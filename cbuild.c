@@ -19,7 +19,8 @@ int main(int argc, char** argv) {
     &build,
     "GL",
     "GLU",
-    "m"
+    "m",
+    "pthread"
   );
   cbuild_srcs(
     &build,

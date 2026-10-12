@@ -3,7 +3,7 @@
 #include <dirent.h>
 #include <limits.h>
 #include <libgen.h>
-
+#include <pthread.h>
 
 //===========================
 // DEFINITIONS BEGINS HERE!
@@ -39,7 +39,13 @@ typedef struct {
   i32 capacity;
 } Wallpapers;
 
-void load_wallpapers(Wallpapers* wps, Config* cfg);
+typedef struct {
+  Wallpapers* wps;
+  Config* cfg;
+  pthread_mutex_t* wallpapers_mutex;
+} ThreadArgs;
+
+void* load_wallpapers(void* _args);
 void wallpapers_delete(Wallpapers* wps);
 
 // :app def
@@ -49,11 +55,14 @@ typedef struct {
   IMR imr;
 
   Config config;
+
+  pthread_mutex_t wallpapers_mutex;
   Wallpapers wallpapers;
 } App;
 
 void app_new(App* app);
 void app_delete(App* app);
+void app_spawn_worker(App* app);
 
 //=============================
 // IMPLEMENTATION BEGINS HERE!
@@ -90,7 +99,12 @@ void wallpaper_delete(Wallpaper* wp) {
 }
 
 // :wallpapers impl
-void load_wallpapers(Wallpapers* wps, Config* cfg) {
+void* load_wallpapers(void* _args) {
+  ThreadArgs* args = (ThreadArgs*) _args;
+  Wallpapers* wps = args->wps;
+  Config* cfg = args->cfg;
+  pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
+
   for (i32 i = 0; i < cfg->paths.len; i++) {
     const char* path = cfg->paths.items[i];
     DIR *dir = opendir(path);
@@ -110,12 +124,18 @@ void load_wallpapers(Wallpapers* wps, Config* cfg) {
         continue;
       }
 
+      // Using mutex lock for changing the wallpapers array
+      pthread_mutex_lock(wallpapers_mutex);
       da_append(wps, wp);
+      pthread_mutex_unlock(wallpapers_mutex);
+
       log_info("Loaded: %s\n", file_path);
     }
 
     closedir(dir);
   }
+
+  return NULL;
 }
 
 void wallpapers_delete(Wallpapers* wps) {
@@ -155,9 +175,9 @@ void app_new(App* app) {
   app->config = (Config) {0};
   config_new(&app->config);
 
-  // Load the wallpapers
+  // Setup the wallpaper mutex
+  app->wallpapers_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
   app->wallpapers = (Wallpapers) {0};
-  load_wallpapers(&app->wallpapers, &app->config);
 }
 
 void app_delete(App* app) {
@@ -168,10 +188,21 @@ void app_delete(App* app) {
   window_delete(app->window);
 }
 
+void app_spawn_worker(App* app) {
+  ThreadArgs* args = mem_alloc(sizeof(ThreadArgs));
+  args->wps = &app->wallpapers;
+  args->cfg = &app->config;
+  args->wallpapers_mutex = &app->wallpapers_mutex;
+
+  pthread_t thread;
+  pthread_create(&thread, NULL, load_wallpapers, (void*) args);
+}
+
 // :main
 int main() {
   App app = {0};
   app_new(&app);
+  app_spawn_worker(&app);
 
   while (!app.window.should_close) {
     imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
@@ -181,7 +212,7 @@ int main() {
 
     imr_begin(&app.imr);
 
-    v2 size = { 300, 300 };
+    v2 size = { 10, 10 };
     f32 gap = 50.0f;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
       Wallpaper* wp = &app.wallpapers.items[i];
