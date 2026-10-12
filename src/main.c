@@ -70,7 +70,10 @@ void config_delete(Config* cfg) {
 
 // :wallpaper impl
 Wallpaper* wallpaper_new(const char* path) {
-  Texture tex = texture_from_file(path, false);
+  Texture tex;
+  if (!texture_from_file(&tex, path, false)) {
+    return NULL;
+  }
 
   Wallpaper* wp = mem_alloc(sizeof(Wallpaper));
   wp->texture = tex;
@@ -93,7 +96,7 @@ void load_wallpapers(Wallpapers* wps, Config* cfg) {
     struct dirent* entry;
     i32 j = 0;
     while ((entry = readdir(dir)) != NULL) {
-      if (j > 5) break;
+      //if (j > 5) break;
 
       char file_path[PATH_MAX];
       sprintf(file_path, "%s/%s", path, entry->d_name);
@@ -118,12 +121,13 @@ void wallpapers_delete(Wallpapers* wps) {
 
 // :app impl
 void app_new(App* app) {
-  app->window = window_new(
+  panic(window_new(
+    &app->window,
     "Mural", 800, 600, (WindowSettings) {
       .fullscreen = false,
       .vsync = true,
     }
-  );
+  ), "Failed to create window\n");
 
   app->camera = ocamera_new(
     (v2) {0,0},
@@ -138,7 +142,7 @@ void app_new(App* app) {
     }
   );
 
-  app->imr = imr_new();
+  panic(imr_new(&app->imr), "Failed to initialize renderer");
 
   // Load the config
   app->config = (Config) {0};

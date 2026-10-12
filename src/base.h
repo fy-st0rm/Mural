@@ -192,7 +192,7 @@ typedef struct {
   size_t size;
 } FileData;
 
-FileData read_file(const char* path);   // Returned buffer is heap allocated. Make sure to free it after use.
+b8 read_file(FileData* fd, const char* path);   // Returned buffer is heap allocated. Make sure to free it after use.
 u64 hash_data(char* data);
 u64 zigzag(i32 x);
 
@@ -377,7 +377,7 @@ typedef struct {
   b8 should_close;
 } Window;
 
-Window window_new(const char* title, u32 width, u32 height, WindowSettings settings);
+b8 window_new(Window* window, const char* title, u32 width, u32 height, WindowSettings settings);
 void window_delete(Window window);
 void window_update(Window* window);
 
@@ -492,8 +492,8 @@ typedef struct {
 
 // TODO: Implement control over texture filters
 // Filters are hard coded for now
-Texture texture_from_file(const char* filepath, b8 flip);
-Texture texture_from_data(u32 width, u32 height, u32* data);
+b8 texture_from_file(Texture* texture, const char* filepath, b8 flip);
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u32* data);
 void texture_clear(Texture texture);
 void texture_bind(Texture texture);
 void texture_unbind(Texture texture);
@@ -506,10 +506,10 @@ typedef enum {
   FRAGMENT_SHADER = GL_FRAGMENT_SHADER
 } ShaderType;
 
-Shader shader_new(const char* v_src, const char* f_src);
-Shader shader_new_from_file(const char* v_path, const char* f_path);
+b8 shader_new(Shader* shader, const char* v_src, const char* f_src);
+b8 shader_new_from_file(Shader* shader, const char* v_path, const char* f_path);
 void shader_delete(Shader id);
-u32 shader_compile(ShaderType type, const char* shader_src);
+b8 shader_compile(u32* id, ShaderType type, const char* shader_src);
 
 // :fbo def
 typedef struct {
@@ -518,7 +518,7 @@ typedef struct {
   Texture color_texture;
 } FBO;
 
-FBO fbo_new(u32 width, u32 height);
+b8 fbo_new(FBO* fbo, u32 width, u32 height);
 void fbo_delete(FBO* fbo);
 void fbo_bind(FBO* fbo);
 void fbo_unbind();
@@ -556,7 +556,7 @@ typedef struct {
   Texture white;
 } IMR;
 
-IMR imr_new();
+b8 imr_new(IMR* imr);
 void imr_delete(IMR* imr);
 void imr_clear(v4 color);
 void imr_begin(IMR* imr);
@@ -601,7 +601,7 @@ typedef struct {
   i32 rows, cols;
 } SpriteSheet;
 
-SpriteSheet spritesheet_new(const char* path, i32 tile_width, i32 tile_height);
+b8 spritesheet_new(SpriteSheet* ss, const char* path, i32 tile_width, i32 tile_height);
 void spritesheet_delete(SpriteSheet* ss);
 void spritesheet_bind(SpriteSheet* ss);
 void spritesheet_unbind(SpriteSheet* ss);
@@ -657,7 +657,7 @@ typedef struct {
   f32 size;
 } Font;
 
-Font font_new(const char* path, f32 size);
+b8 font_new(Font* font, const char* path, f32 size);
 void font_render(IMR* imr, Font* font, const char* text, v3 pos, v4 color);
 v2 font_calc_size(Font* font, const char* text);
 void font_delete(Font* font);
@@ -695,9 +695,14 @@ void ctx_end() {
 }
 
 // :utils impl
-FileData read_file(const char* path) {
+b8 read_file(FileData* fd, const char* path) {
+  panic(fd, "Paramter fd cannot be NULL");
+
   FILE* file = fopen(path, "rb");
-  panic(file, "Failed to open file: %s", path);
+  if (file == NULL) {
+    log_error("Failed to open file: %s", path);
+    return false;
+  }
 
   // Get file size
   fseek(file, 0, SEEK_END);
@@ -716,10 +721,11 @@ FileData read_file(const char* path) {
   buffer[size] = '\0';
 
   fclose(file);
-  return (FileData) {
-    .data = buffer,
-    .size = size,
-  };
+
+  // Storing the result
+  fd->data = buffer;
+  fd->size = size;
+  return true;
 }
 
 u64 hash_data(char* data) {
@@ -1349,11 +1355,14 @@ Rect rect_with_offset(v2 pos, Rect offset_rect) {
 }
 
 // :window impl
-Window window_new(const char* title, u32 width, u32 height, WindowSettings settings) {
+b8 window_new(Window* window, const char* title, u32 width, u32 height, WindowSettings settings) {
   // Initialize the context
   ctx_begin();
 
-  panic(glfwInit(), "Failed to initialize glfw\n");
+  if (!glfwInit()) {
+    log_error("Failed to initialize glfw\n");
+    return false;
+  }
 
   GLFWmonitor* monitor = NULL;
   if (settings.fullscreen) {
@@ -1380,21 +1389,26 @@ Window window_new(const char* title, u32 width, u32 height, WindowSettings setti
     width, height,
     title, monitor, NULL
   );
-  panic(glfw_window, "Failed to create glfw window\n");
+  if (!glfw_window) {
+    log_error("Failed to create glfw window\n");
+    return false;
+  }
 
   glfwMakeContextCurrent(glfw_window);
-  panic(glewInit() == GLEW_OK, "Failed to initialize glew\n");
+  if (glewInit() != GLEW_OK) {
+    log_error("Failed to initialize glew\n");
+    return false;
+  }
 
   // vsync
   glfwSwapInterval((settings.vsync) ? 1 : 0);
 
-  b8 should_close = glfwWindowShouldClose(glfw_window);
-  return (Window) {
-    .glfw_window = glfw_window,
-    .width = width,
-    .height = height,
-    .should_close = should_close
-  };
+  window->glfw_window = glfw_window;
+  window->width = width;
+  window->height = height;
+  window->should_close = glfwWindowShouldClose(glfw_window);
+
+  return true;
 }
 
 void window_delete(Window window) {
@@ -1714,12 +1728,17 @@ m4 pcamera_calc_mvp(PCamera* cam) {
 }
 
 // :texture impl
-Texture texture_from_file(const char* filepath, b8 flip) {
+b8 texture_from_file(Texture* texture, const char* filepath, b8 flip) {
+  panic(texture, "Parameter texture cannot be NULL");
+
   stbi_set_flip_vertically_on_load(flip);
 
   i32 w, h, c;
   u8* data = stbi_load(filepath, &w, &h, &c, 0);
-  panic(data, "Failed to load file: %s\n", filepath);
+  if (!data) {
+    log_error("Failed to load file: %s\n", filepath);
+    return false;
+  }
 
   // Binding the texture
   u32 id;
@@ -1752,29 +1771,33 @@ Texture texture_from_file(const char* filepath, b8 flip) {
     stbi_image_free(data);
   }
 
-  return (Texture) {
-    id, w, h
-  };
+  texture->id = id;
+  texture->width = w;
+  texture->height = h;
+  return true;
 }
 
-Texture texture_from_data(u32 width, u32 height, u32* data) {
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u32* data) {
+  panic(texture, "Parameter texture cannot be NULL");
+
   u32 id;
   GLCall(glGenTextures(1, &id));
   GLCall(glBindTexture(GL_TEXTURE_2D, id));
-  
+
   // Setting up some basic modes to display texture
   GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
   GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
   GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
   GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-  
+
   // Sending the pixel data to opengl
   GLCall(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data));
   GLCall(glBindTexture(GL_TEXTURE_2D, 0));
 
-  return (Texture) {
-    id, width, height
-  };
+  texture->id = id;
+  texture->width = width;
+  texture->height = height;
+  return true;
 }
 
 void texture_clear(Texture texture) {
@@ -1797,11 +1820,14 @@ void texture_delete(Texture texture) {
 }
 
 // :shader impl
-Shader shader_new(const char* v_src, const char* f_src) {
-  u32 program = glCreateProgram();
+b8 shader_new(Shader* shader, const char* v_src, const char* f_src) {
+  panic(shader , "Parameter shader cannot be NULL");
 
-  u32 vs = shader_compile(GL_VERTEX_SHADER,   v_src);
-  u32 fs = shader_compile(GL_FRAGMENT_SHADER, f_src);
+  u32 program = glCreateProgram();
+  u32 vs, fs;
+
+  if (!shader_compile(&vs, GL_VERTEX_SHADER,   v_src)) return false;
+  if (!shader_compile(&fs, GL_FRAGMENT_SHADER, f_src)) return false;
 
   // Attaching shader
   GLCall(glAttachShader(program, vs));
@@ -1812,26 +1838,36 @@ Shader shader_new(const char* v_src, const char* f_src) {
   GLCall(glDeleteShader(vs));
   GLCall(glDeleteShader(fs));
 
-  return program;
+  *shader = program;
+  return true;
 }
 
-Shader shader_new_from_file(const char* v_path, const char* f_path) {
-  char* v_src = read_file(v_path).data;
-  char* f_src = read_file(f_path).data;
+b8 shader_new_from_file(Shader* shader, const char* v_path, const char* f_path) {
+  panic(shader , "Parameter shader cannot be NULL");
 
-  Shader shader = shader_new(v_src, f_src);
+  FileData v_file = {0};
+  FileData f_file = {0};
+
+  if (!read_file(&v_file, v_path)) return false;
+  if (!read_file(&f_file, f_path)) return false;
+
+  char* v_src = v_file.data;
+  char* f_src = f_file.data;
+
+  if (!shader_new(shader, v_src, f_src)) return false;
 
   free(v_src);
   free(f_src);
-
-  return shader;
+  return true;
 }
 
 void shader_delete(Shader id) {
   GLCall(glDeleteProgram(id));
 }
 
-u32 shader_compile(ShaderType type, const char* shader_src) {
+b8 shader_compile(u32* src_id, ShaderType type, const char* shader_src) {
+  panic(src_id, "Parameter src_id cannot be NULL");
+
   u32 id = glCreateShader(type);
   GLCall(glShaderSource(id, 1, &shader_src, NULL));
   GLCall(glCompileShader(id));
@@ -1843,19 +1879,23 @@ u32 shader_compile(ShaderType type, const char* shader_src) {
     i32 length;
     GLCall(glGetShaderiv(id, GL_INFO_LOG_LENGTH, &length));
 
-    // TODO: This memory is not freed.
     char message[length];
     GLCall(glGetShaderInfoLog(id, length, &length, message));
 
-    panic(false, "Failed to compile [%s shader]\n%s\n",
+    log_error("Failed to compile [%s shader]\n%s\n",
       (type == GL_VERTEX_SHADER ? "Vertex" : "Fragment"), message
     );
+    return false;
   }
-  return id;
+
+  *src_id = id;
+  return true;
 }
 
 // :fbo impl
-FBO fbo_new(u32 width, u32 height) {
+b8 fbo_new(FBO* fbo, u32 width, u32 height) {
+  panic(fbo, "Parameter fbo cannot be NULL");
+
   u32 id;
 
   // Generate and bind framebuffer
@@ -1863,7 +1903,9 @@ FBO fbo_new(u32 width, u32 height) {
   GLCall(glBindFramebuffer(GL_FRAMEBUFFER, id));
 
   // Color texture
-  Texture color_texture = texture_from_data(width, height, NULL);
+  Texture color_texture;
+  if (!texture_from_data(&color_texture, width, height, NULL)) return false;
+
   GLCall(glFramebufferTexture2D(
     GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
     GL_TEXTURE_2D, color_texture.id, 0
@@ -1876,17 +1918,15 @@ FBO fbo_new(u32 width, u32 height) {
   GLCall(glBindTexture(GL_TEXTURE_2D, 0));
   GLCall(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 
-  panic(
-    glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
-    "Framebuffer is not complete!\n"
-  );
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    log_error("Framebuffer is not complete!\n");
+  }
 
-  return (FBO) {
-    .id = id,
-    .width = width,
-    .height = height,
-    .color_texture = color_texture,
-  };
+  fbo->id = id;
+  fbo->width = width;
+  fbo->height = height;
+  fbo->color_texture = color_texture;
+  return true;
 }
 
 void fbo_delete(FBO* fbo) {
@@ -1993,7 +2033,9 @@ const char* __internal_f_src =
   "}\n"
   "}\n";
 
-IMR imr_new() {
+b8 imr_new(IMR* imr) {
+  panic(imr, "Parameter imr cannot be NULL");
+
   u32 vao, vbo;
 
   GLCall(glEnable(GL_BLEND));
@@ -2032,31 +2074,34 @@ IMR imr_new() {
 
   // Generating white texture
   u32 data = 0xffffffff;
-  Texture white = texture_from_data(1, 1, &data);
+  Texture white;
+  if (!texture_from_data(&white, 1, 1, &data)) return false;
   texture_bind(white);
 
   // Shader
-  Shader shader = shader_new(__internal_v_src, __internal_f_src);
+  Shader shader;
+  if (!shader_new(&shader, __internal_v_src, __internal_f_src)) {
+    return false;
+  }
   GLCall(glUseProgram(shader));
 
   // Providing texture samples
   u32 samplers[TEXTURE_SAMPLE_AMT];
   for (u32 i = 0; i < TEXTURE_SAMPLE_AMT; i++)
     samplers[i] = i;
-  
+
   // Providing samplers to the shader
   int loc = GLCall(glGetUniformLocation(shader, "textures"));
   panic(loc != -1, "Cannot find uniform: textures\n");
   GLCall(glUniform1iv(loc, TEXTURE_SAMPLE_AMT, samplers));
 
-  return (IMR) {
-    .vao = vao,
-    .vbo = vbo,
-    .shader = shader,
-    .def_shader = shader,
-    .buff_idx = 0,
-    .white = white
-  };
+  imr->vao = vao;
+  imr->vbo = vbo;
+  imr->shader = shader;
+  imr->def_shader = shader;
+  imr->buff_idx = 0;
+  imr->white = white;
+  return true;
 }
 
 void imr_delete(IMR* imr) {
@@ -2287,15 +2332,19 @@ void imr_push_triangle_tex(IMR* imr, v3 p1, v3 p2, v3 p3, Triangle tex_coord, f3
 }
 
 // :spritesheet impl
-SpriteSheet spritesheet_new(const char* path, i32 tile_width, i32 tile_height) {
-  Texture texture = texture_from_file(path, false);
+b8 spritesheet_new(SpriteSheet* ss, const char* path, i32 tile_width, i32 tile_height) {
+  panic(ss, "Parameter ss cannot be NULL");
+
+  Texture texture;
+  if (!texture_from_file(&texture, path, false)) return false;
+
   i32 rows = floorf(texture.height / tile_height);
   i32 cols = floorf(texture.width / tile_width);
-  return (SpriteSheet) {
-    .texture = texture,
-    .rows = rows,
-    .cols = cols,
-  };
+
+  ss->texture = texture;
+  ss->rows = rows;
+  ss->cols = cols;
+  return true;
 }
 
 void spritesheet_delete(SpriteSheet* ss) {
@@ -2311,6 +2360,8 @@ void spritesheet_unbind(SpriteSheet* ss) {
 }
 
 Frames spritesheet_extract_frames(SpriteSheet* ss, i32 at_row, i32 column_start, i32 column_end) {
+  panic(ss, "Parameter ss cannot be NULL");
+
   Frames frames = {0};
 
   for (i32 i = column_start; i <= column_end; i++) {
@@ -2325,6 +2376,8 @@ Frames spritesheet_extract_frames(SpriteSheet* ss, i32 at_row, i32 column_start,
 }
 
 Frame spritesheet_extract_frame(SpriteSheet* ss, i32 row, i32 col) {
+  panic(ss, "Parameter ss cannot be NULL");
+
   return (Frame) {
     .x = (f32) col / ss->cols,
     .y = (f32) row / ss->rows,
@@ -2338,6 +2391,8 @@ Frame spritesheet_extract_region(
   i32 row, i32 col,
   i32 row_span, i32 col_span
 ) {
+  panic(ss, "Parameter ss cannot be NULL");
+
   return (Frame) {
     .x = (f32) col / ss->cols,
     .y = (f32) row / ss->rows,
@@ -2356,7 +2411,7 @@ Animator animator_new() {
 }
 
 void animator_delete(Animator* animator) {
-  panic(animator, "Animator pointer is null");
+  panic(animator, "Parameter animator cannot be NULL");
 
   for (i32 i = 0; i < animator->entries.len; i++) {
     // Free the internal frame of each animation
@@ -2421,8 +2476,12 @@ Frame animator_get_frame(Animator* animator) {
 }
 
 // :font impl
-Font font_new(const char* path, f32 size) {
-  FileData file = read_file(path);
+b8 font_new(Font* font, const char* path, f32 size) {
+  panic(font, "Parameter font cannot be NULL");
+
+  FileData file = {0};
+  if (!read_file(&file, path)) return false;
+
   u8* bitmap = mem_alloc(FONT_ATLAS_W * FONT_ATLAS_H);
 
   stbtt_packedchar chars[96];
@@ -2438,7 +2497,10 @@ Font font_new(const char* path, f32 size) {
     1,
     NULL
   );
-  panic(ok, "Failed creating font atlas");
+  if (!ok) {
+    log_error("Failed creating font atlas\n");
+    return false;
+  }
 
   stbtt_PackFontRange(
     &ctx,
@@ -2461,15 +2523,14 @@ Font font_new(const char* path, f32 size) {
   }
 
   // Create opengl texture from the rgba buffer
-  Font font = {
-    .atlas = texture_from_data(FONT_ATLAS_W, FONT_ATLAS_H, rgba),
-    .size = size,
-  };
+  font->size = size;
+  if (!texture_from_data(&font->atlas, FONT_ATLAS_W, FONT_ATLAS_H, rgba))
+    return false;
 
   // Load the glyphs
   for(i32 i = 0; i < 96; i++) {
     stbtt_packedchar c = chars[i];
-    font.glyphs[i + 32] = (Glyph) {
+    font->glyphs[i + 32] = (Glyph) {
       .uv = {
         c.x0 / (f32)FONT_ATLAS_W,
         c.y0 / (f32)FONT_ATLAS_H,
@@ -2498,7 +2559,7 @@ Font font_new(const char* path, f32 size) {
   free(file.data);
   mem_free(bitmap);
   mem_free(rgba);
-  return font;
+  return true;
 }
 
 void font_render(IMR* imr, Font* font, const char* text, v3 pos, v4 color) {
