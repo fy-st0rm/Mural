@@ -26,15 +26,15 @@ void config_delete(Config* cfg);
 // :wallpaper def
 typedef struct {
   Texture texture;
-  const char name[NAME_MAX];
+  char* name;
 } Wallpaper;
 
-Wallpaper* wallpaper_new(const char* path);
+b8 wallpaper_new(Wallpaper* wp, const char* path);
 void wallpaper_delete(Wallpaper* wp);
 
 // :wallpapers def
 typedef struct {
-  Wallpaper** items;
+  Wallpaper* items;    // This owns the Wallpaper memory
   i32 len;
   i32 capacity;
 } Wallpapers;
@@ -69,21 +69,24 @@ void config_delete(Config* cfg) {
 }
 
 // :wallpaper impl
-Wallpaper* wallpaper_new(const char* path) {
+b8 wallpaper_new(Wallpaper* wp, const char* path) {
+  panic(wp, "Parameter wp cannot be NULL");
+
   Texture tex;
   if (!texture_from_file(&tex, path, false)) {
-    return NULL;
+    return false;
   }
 
-  Wallpaper* wp = mem_alloc(sizeof(Wallpaper));
+  char* name = basename((char*) path);
   wp->texture = tex;
-  strcpy((char*) wp->name, basename((char*) path));
-  return wp;
+  wp->name = mem_alloc(strlen(name) + 1);
+  strcpy(wp->name, name);
+  return true;
 }
 
 void wallpaper_delete(Wallpaper* wp) {
   texture_delete(wp->texture);
-  mem_free(wp);
+  mem_free(wp->name);
 }
 
 // :wallpapers impl
@@ -91,20 +94,24 @@ void load_wallpapers(Wallpapers* wps, Config* cfg) {
   for (i32 i = 0; i < cfg->paths.len; i++) {
     const char* path = cfg->paths.items[i];
     DIR *dir = opendir(path);
-    panic(dir, "Cannot open dir: %s\n", path);
+    if (!dir) {
+      log_error("Cannot open dir: %s\n", path);
+      continue;
+    }
 
     struct dirent* entry;
-    i32 j = 0;
     while ((entry = readdir(dir)) != NULL) {
-      //if (j > 5) break;
-
       char file_path[PATH_MAX];
       sprintf(file_path, "%s/%s", path, entry->d_name);
 
-      Wallpaper* wp = wallpaper_new(file_path);
+      Wallpaper wp;
+      if (!wallpaper_new(&wp, file_path)) {
+        log_warn("Skipping: %s\n", file_path);
+        continue;
+      }
+
       da_append(wps, wp);
       log_info("Loaded: %s\n", file_path);
-      j++;
     }
 
     closedir(dir);
@@ -113,7 +120,7 @@ void load_wallpapers(Wallpapers* wps, Config* cfg) {
 
 void wallpapers_delete(Wallpapers* wps) {
   for (i32 i = 0; i < wps->len; i++) {
-    wallpaper_delete(wps->items[i]);
+    wallpaper_delete(&wps->items[i]);
   }
 
   mem_free(wps->items);
@@ -177,7 +184,7 @@ int main() {
     v2 size = { 300, 300 };
     f32 gap = 50.0f;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
-      Wallpaper* wp = app.wallpapers.items[i];
+      Wallpaper* wp = &app.wallpapers.items[i];
       texture_bind(wp->texture);
       imr_push_quad_tex_rounded(
         &app.imr,
