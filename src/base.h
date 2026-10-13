@@ -493,7 +493,7 @@ typedef struct {
 // TODO: Implement control over texture filters
 // Filters are hard coded for now
 b8 texture_from_file(Texture* texture, const char* filepath, b8 flip);
-b8 texture_from_data(Texture* texture, u32 width, u32 height, u32* data);
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, i32 channel);
 void texture_clear(Texture texture);
 void texture_bind(Texture texture);
 void texture_unbind(Texture texture);
@@ -1777,7 +1777,7 @@ b8 texture_from_file(Texture* texture, const char* filepath, b8 flip) {
   return true;
 }
 
-b8 texture_from_data(Texture* texture, u32 width, u32 height, u32* data) {
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, i32 channel) {
   panic(texture, "Parameter texture cannot be NULL");
 
   u32 id;
@@ -1791,7 +1791,22 @@ b8 texture_from_data(Texture* texture, u32 width, u32 height, u32* data) {
   GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
 
   // Sending the pixel data to opengl
-  GLCall(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data));
+  GLenum internal_format, format;
+  if (channel == 1) {
+    internal_format = GL_RED;
+    format = GL_RED;
+  } else if (channel == 3) {
+    internal_format = GL_RGB;
+    format = GL_RGB;
+  } else if (channel == 4) {
+    internal_format = GL_RGBA;
+    format = GL_RGBA;
+  } else {
+    log_error("Invalid channel %d, Only Supports (1, 3, 4)\n", channel);
+  }
+
+  // Sending the pixel data to opengl
+  GLCall(glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, GL_UNSIGNED_BYTE, data));
   GLCall(glBindTexture(GL_TEXTURE_2D, 0));
 
   texture->id = id;
@@ -1904,7 +1919,7 @@ b8 fbo_new(FBO* fbo, u32 width, u32 height) {
 
   // Color texture
   Texture color_texture;
-  if (!texture_from_data(&color_texture, width, height, NULL)) return false;
+  if (!texture_from_data(&color_texture, width, height, NULL, 4)) return false;
 
   GLCall(glFramebufferTexture2D(
     GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2073,9 +2088,9 @@ b8 imr_new(IMR* imr) {
   GLCall(glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (const void*) offsetof(Vertex, radius)));
 
   // Generating white texture
-  u32 data = 0xffffffff;
+  u8 data = 0xff;
   Texture white;
-  if (!texture_from_data(&white, 1, 1, &data)) return false;
+  if (!texture_from_data(&white, 1, 1, &data, 4)) return false;
   texture_bind(white);
 
   // Shader
@@ -2524,7 +2539,7 @@ b8 font_new(Font* font, const char* path, f32 size) {
 
   // Create opengl texture from the rgba buffer
   font->size = size;
-  if (!texture_from_data(&font->atlas, FONT_ATLAS_W, FONT_ATLAS_H, rgba))
+  if (!texture_from_data(&font->atlas, FONT_ATLAS_W, FONT_ATLAS_H, (u8*) rgba, 4))
     return false;
 
   // Load the glyphs

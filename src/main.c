@@ -24,12 +24,25 @@ void config_new(Config* cfg);
 void config_delete(Config* cfg);
 
 // :wallpaper def
+typedef enum {
+  W_PENDING,
+  W_LOADED,
+  W_READY,
+  W_FAILED,
+} WallpaperState;
+
 typedef struct {
   Texture texture;
-  char* name;
+  char* path;
+  WallpaperState state;
+
+  u8* data;
+  i32 w, h;
+  i32 channel;
 } Wallpaper;
 
-b8 wallpaper_new(Wallpaper* wp, const char* path);
+b8 wallpaper_read_from_file(Wallpaper* wp);
+b8 wallpaper_create_texture(Wallpaper* wp);
 void wallpaper_delete(Wallpaper* wp);
 
 // :wallpapers def
@@ -45,8 +58,10 @@ typedef struct {
   pthread_mutex_t* wallpapers_mutex;
 } ThreadArgs;
 
-void* load_wallpapers(void* _args);
+// This will only load up the name of the wallpaper instead of the actual textures
+void wallpapers_new(Wallpapers* wps, Config* cfg);
 void wallpapers_delete(Wallpapers* wps);
+void* load_wallpapers(void* _args);
 
 // :app def
 typedef struct {
@@ -78,33 +93,48 @@ void config_delete(Config* cfg) {
 }
 
 // :wallpaper impl
-b8 wallpaper_new(Wallpaper* wp, const char* path) {
+b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
-  Texture tex;
-  if (!texture_from_file(&tex, path, false)) {
+  i32 w, h, c;
+  u8* data = stbi_load(wp->path, &w, &h, &c, 0);
+  if (!data) {
+    log_error("Failed to load file: %s\n", wp->path);
+    wp->state = W_FAILED;
     return false;
   }
 
-  char* name = basename((char*) path);
+  wp->data = data;
+  wp->w = w;
+  wp->h = h;
+  wp->channel = c;
+  wp->state = W_LOADED;
+  return true;
+}
+
+b8 wallpaper_create_texture(Wallpaper* wp) {
+  panic(wp, "Parameter wp cannot be NULL");
+
+  Texture tex = {0};
+  if (!texture_from_data(&tex, wp->w, wp->h, wp->data, wp->channel)) {
+    wp->state = W_FAILED;
+    return false;
+  }
+
+  stbi_image_free(wp->data);
+
   wp->texture = tex;
-  wp->name = mem_alloc(strlen(name) + 1);
-  strcpy(wp->name, name);
+  wp->state = W_READY;
   return true;
 }
 
 void wallpaper_delete(Wallpaper* wp) {
   texture_delete(wp->texture);
-  mem_free(wp->name);
+  free(wp->path);
 }
 
 // :wallpapers impl
-void* load_wallpapers(void* _args) {
-  ThreadArgs* args = (ThreadArgs*) _args;
-  Wallpapers* wps = args->wps;
-  Config* cfg = args->cfg;
-  pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
-
+void wallpapers_new(Wallpapers* wps, Config* cfg) {
   for (i32 i = 0; i < cfg->paths.len; i++) {
     const char* path = cfg->paths.items[i];
     DIR *dir = opendir(path);
@@ -118,24 +148,17 @@ void* load_wallpapers(void* _args) {
       char file_path[PATH_MAX];
       sprintf(file_path, "%s/%s", path, entry->d_name);
 
-      Wallpaper wp;
-      if (!wallpaper_new(&wp, file_path)) {
-        log_warn("Skipping: %s\n", file_path);
-        continue;
-      }
-
-      // Using mutex lock for changing the wallpapers array
-      pthread_mutex_lock(wallpapers_mutex);
+      Wallpaper wp = {
+        .path  = strdup(file_path),
+        .state = W_PENDING,
+      };
       da_append(wps, wp);
-      pthread_mutex_unlock(wallpapers_mutex);
 
-      log_info("Loaded: %s\n", file_path);
+      log_info("Found: %s\n", file_path);
     }
 
     closedir(dir);
   }
-
-  return NULL;
 }
 
 void wallpapers_delete(Wallpapers* wps) {
@@ -144,6 +167,34 @@ void wallpapers_delete(Wallpapers* wps) {
   }
 
   mem_free(wps->items);
+}
+
+void* load_wallpapers_into_memory(void* _args) {
+  ThreadArgs* args = (ThreadArgs*) _args;
+  Wallpapers* wps = args->wps;
+  Config* cfg = args->cfg;
+  pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
+
+  for (i32 i = 0; i < wps->len; i++) {
+    Wallpaper* wp = &wps->items[i];
+
+    // NOTE(slok): Currently the mutex is not used rn
+    //pthread_mutex_lock(wallpapers_mutex);
+    if (wp->state == W_PENDING) {
+      if (!wallpaper_read_from_file(wp)) {
+        log_warn("Skipping: %s\n", wp->path);
+        //pthread_mutex_unlock(wallpapers_mutex);
+        continue;
+      }
+    }
+
+    log_info("Loaded: %s\n", wp->path);
+    //pthread_mutex_unlock(wallpapers_mutex);
+  }
+
+  log_sucess("Done Loading\n");
+
+  return NULL;
 }
 
 // :app impl
@@ -175,9 +226,10 @@ void app_new(App* app) {
   app->config = (Config) {0};
   config_new(&app->config);
 
-  // Setup the wallpaper mutex
+  // Setup the wallpapers and mutex
   app->wallpapers_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
   app->wallpapers = (Wallpapers) {0};
+  wallpapers_new(&app->wallpapers, &app->config);
 }
 
 void app_delete(App* app) {
@@ -195,7 +247,7 @@ void app_spawn_worker(App* app) {
   args->wallpapers_mutex = &app->wallpapers_mutex;
 
   pthread_t thread;
-  pthread_create(&thread, NULL, load_wallpapers, (void*) args);
+  pthread_create(&thread, NULL, load_wallpapers_into_memory, (void*) args);
 }
 
 // :main
@@ -212,21 +264,40 @@ int main() {
 
     imr_begin(&app.imr);
 
-    v2 size = { 10, 10 };
+    v2 size = { 300, 300 };
     f32 gap = 50.0f;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
       Wallpaper* wp = &app.wallpapers.items[i];
-      texture_bind(wp->texture);
-      imr_push_quad_tex_rounded(
-        &app.imr,
-        (v3) { i * size.x + gap, 100, 0 },
-        size,
-        (Rect) { 0, 0, 1, 1 },
-        wp->texture.id,
-        m4_identity(),
-        (v4) { 1, 1, 1, 1 },
-        20.0f
-      );
+
+      switch (wp->state) {
+        case W_PENDING:
+          break;
+
+        case W_LOADED:
+          if (!wallpaper_create_texture(wp)) {
+            log_error("Failed to create texture for: %s\n", basename(wp->path));
+            continue;
+          }
+          log_info("TEXTURE: %d: %s\n", wp->texture.id, basename(wp->path));
+          break;
+
+        case W_READY:
+          texture_bind(wp->texture);
+          imr_push_quad_tex_rounded(
+            &app.imr,
+            (v3) { i * size.x + gap, 100, 0 },
+            size,
+            (Rect) { 0, 0, 1, 1 },
+            wp->texture.id,
+            m4_identity(),
+            (v4) { 1, 1, 1, 1 },
+            20.0f
+          );
+          break;
+
+        case W_FAILED:
+          break;
+      }
     }
 
     imr_end(&app.imr);
