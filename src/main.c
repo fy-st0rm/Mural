@@ -388,39 +388,62 @@ void app_spawn_workers(App* app, i32 workers) {
 }
 
 void app_create_layout(App* app) {
-  f32 gap = 10.0f;
-  f32 x = gap;
-  f32 y = 0;
+  // Layout settings
+  f32 margin = 50.0f;
+  f32 min_gap = 10.0f;
 
-  u32 window_width = app->window.width;
-  i32 per_row = window_width / (THUMB_W + gap);
+  f32 window_width = (f32)app->window.width;
 
-  i32 r = 0;
+  // Calculate usable width
+  f32 available_width = window_width - 2.0f * margin;
+
+  // Calculate how many thumbnails fit
+  i32 per_row = (i32)((available_width + min_gap) / (THUMB_W + min_gap));
+
+  if (per_row < 1)
+    per_row = 1;
+
+  // Calculate gap needed to fill the row
+  f32 gap;
+
+  if (per_row == 1) {
+    gap = 0.0f;
+  } else {
+    gap = (available_width - per_row * THUMB_W) / (per_row - 1);
+  }
+
+  // Starting position
+  f32 x = margin;
+  f32 y = margin;
+
+  i32 row_count = 0;
+
+  // Tallest thumbnail in the current row
   i32 max_h = 0;
+
   for (i32 i = 0; i < app->wallpapers.len; i++) {
     Wallpaper* wp = &app->wallpapers.items[i];
 
-    // Capture the max height for the row
-    if (wp->h > max_h) {
-      max_h = wp->h;
-    }
-
+    // Set thumbnail position
     wp->x = x;
-    wp->y = y; 
+    wp->y = y;
 
-    // Increase the x and element in row
-    x += THUMB_W + gap;
-    r++;
+    // Track tallest thumbnail
+    if (wp->h > max_h)
+      max_h = wp->h;
 
-    // If element in row is greater than per row
-    if (r >= per_row) {
-      // Increase y
-      y += max_h + gap;
+    row_count++;
 
-      // Reset
-      x = gap;
+    // Start a new row when current row is full
+    if (row_count >= per_row) {
+      y += max_h + min_gap;
+
+      x = margin;
       max_h = 0;
-      r = 0;
+      row_count = 0;
+    } else {
+      // Move to next thumbnail
+      x += THUMB_W + gap;
     }
   }
 }
