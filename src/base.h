@@ -12,6 +12,7 @@
 #include "external/glfw/include/GLFW/glfw3.h"
 #include "external/stb/stb_image.h"
 #include "external/stb/stb_truetype.h"
+#include "external/stb/stb_image_resize2.h"
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -486,14 +487,22 @@ void pcamera_handle_mouse(PCamera* cam, Window window);
 m4 pcamera_calc_mvp(PCamera* cam);
 
 // :texture def
+typedef enum {
+  TEX_RED  = 1,
+  TEX_RGB  = 3,
+  TEX_RGBA = 4,
+} TextureChannel;
+
 typedef struct {
   u32 id, width, height;
+  TextureChannel channel;
 } Texture;
 
 // TODO: Implement control over texture filters
 // Filters are hard coded for now
 b8 texture_from_file(Texture* texture, const char* filepath, b8 flip);
-b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, i32 channel);
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, TextureChannel channel);
+b8 texture_update(Texture texture, i32 lod, v2 offset, v2 size, u8* data);
 void texture_clear(Texture texture);
 void texture_bind(Texture texture);
 void texture_unbind(Texture texture);
@@ -1753,17 +1762,28 @@ b8 texture_from_file(Texture* texture, const char* filepath, b8 flip) {
 
   // Sending the pixel data to opengl
   GLenum internal_format, format;
-  if (c == 1) {
-    internal_format = GL_RED;
-    format = GL_RED;
-  } else if (c == 3) {
-    internal_format = GL_RGB;
-    format = GL_RGB;
-  } else if (c == 4) {
-    internal_format = GL_RGBA;
-    format = GL_RGBA;
+  switch (c) {
+    case TEX_RED:
+      internal_format = GL_RED;
+      format = GL_RED;
+      break;
+
+    case TEX_RGB:
+      internal_format = GL_RGB;
+      format = GL_RGB;
+      break;
+
+    case TEX_RGBA:
+      internal_format = GL_RGBA;
+      format = GL_RGBA;
+      break;
+
+    default:
+      log_error("Invalid channel %d, Only Supports (TEX_RED, TEX_RGB, TEX_RGBA)\n", c);
+      return false;
   }
 
+  GLCall(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
   GLCall(glTexImage2D(GL_TEXTURE_2D, 0, internal_format, w, h, 0, format, GL_UNSIGNED_BYTE, data));
   GLCall(glBindTexture(GL_TEXTURE_2D, 0));
 
@@ -1774,11 +1794,17 @@ b8 texture_from_file(Texture* texture, const char* filepath, b8 flip) {
   texture->id = id;
   texture->width = w;
   texture->height = h;
+  texture->channel = c;
   return true;
 }
 
-b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, i32 channel) {
+b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, TextureChannel channel) {
   panic(texture, "Parameter texture cannot be NULL");
+
+  if (width == 0 || height == 0) {
+    log_error("Invalid dimensions\n");
+    return false;
+  }
 
   u32 id;
   GLCall(glGenTextures(1, &id));
@@ -1792,27 +1818,64 @@ b8 texture_from_data(Texture* texture, u32 width, u32 height, u8* data, i32 chan
 
   // Sending the pixel data to opengl
   GLenum internal_format, format;
-  if (channel == 1) {
-    internal_format = GL_RED;
-    format = GL_RED;
-  } else if (channel == 3) {
-    internal_format = GL_RGB;
-    format = GL_RGB;
-  } else if (channel == 4) {
-    internal_format = GL_RGBA;
-    format = GL_RGBA;
-  } else {
-    log_error("Invalid channel %d, Only Supports (1, 3, 4)\n", channel);
+  switch (channel) {
+    case TEX_RED:
+      internal_format = GL_RED;
+      format = GL_RED;
+      break;
+
+    case TEX_RGB:
+      internal_format = GL_RGB;
+      format = GL_RGB;
+      break;
+
+    case TEX_RGBA:
+      internal_format = GL_RGBA;
+      format = GL_RGBA;
+      break;
+
+    default:
+      log_error("Invalid channel %d, Only Supports (TEX_RED, TEX_RGB, TEX_RGBA)\n", channel);
+      return false;
   }
 
   // Sending the pixel data to opengl
+  GLCall(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
   GLCall(glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, GL_UNSIGNED_BYTE, data));
   GLCall(glBindTexture(GL_TEXTURE_2D, 0));
 
   texture->id = id;
   texture->width = width;
   texture->height = height;
+  texture->channel = channel;
   return true;
+}
+
+b8 texture_update(Texture texture, i32 lod, v2 offset, v2 size, u8* data) {
+  GLenum internal_format, format;
+  switch (texture.channel) {
+    case TEX_RED:
+      internal_format = GL_RED;
+      format = GL_RED;
+      break;
+
+    case TEX_RGB:
+      internal_format = GL_RGB;
+      format = GL_RGB;
+      break;
+
+    case TEX_RGBA:
+      internal_format = GL_RGBA;
+      format = GL_RGBA;
+      break;
+
+    default:
+      log_error("Invalid channel %d, Only Supports (TEX_RED, TEX_RGB, TEX_RGBA)\n", texture.channel);
+      return false;
+  }
+
+  texture_bind(texture);
+  GLCall(glTextureSubImage2D(texture.id, lod, offset.x, offset.y, size.x, size.y, format, GL_UNSIGNED_BYTE, data));
 }
 
 void texture_clear(Texture texture) {
@@ -1919,7 +1982,7 @@ b8 fbo_new(FBO* fbo, u32 width, u32 height) {
 
   // Color texture
   Texture color_texture;
-  if (!texture_from_data(&color_texture, width, height, NULL, 4)) return false;
+  if (!texture_from_data(&color_texture, width, height, NULL, TEX_RGBA)) return false;
 
   GLCall(glFramebufferTexture2D(
     GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2088,9 +2151,9 @@ b8 imr_new(IMR* imr) {
   GLCall(glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (const void*) offsetof(Vertex, radius)));
 
   // Generating white texture
-  u8 data = 0xff;
+  u8 data[] = { 255, 255, 255, 255 };
   Texture white;
-  if (!texture_from_data(&white, 1, 1, &data, 4)) return false;
+  if (!texture_from_data(&white, 1, 1, data, TEX_RGBA)) return false;
   texture_bind(white);
 
   // Shader
@@ -2539,7 +2602,7 @@ b8 font_new(Font* font, const char* path, f32 size) {
 
   // Create opengl texture from the rgba buffer
   font->size = size;
-  if (!texture_from_data(&font->atlas, FONT_ATLAS_W, FONT_ATLAS_H, (u8*) rgba, 4))
+  if (!texture_from_data(&font->atlas, FONT_ATLAS_W, FONT_ATLAS_H, (u8*) rgba, TEX_RGBA))
     return false;
 
   // Load the glyphs
@@ -2635,6 +2698,9 @@ void font_delete(Font* font) {
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "external/stb/stb_truetype.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "external/stb/stb_image_resize2.h"
 
 #endif // BASE_IMPLEMENTATION
 

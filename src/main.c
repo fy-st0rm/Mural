@@ -5,6 +5,13 @@
 #include <libgen.h>
 #include <pthread.h>
 
+#define THUMBNAIL_MAX 400
+#define ATLAS_SIZE (v2) { THUMBNAIL_MAX, 1000 }
+
+// TODOS:
+// - Load only thumbnails
+// - Create a atlas for thumbnails (make atlas per thread so that we can keep max threads at 31)
+
 //===========================
 // DEFINITIONS BEGINS HERE!
 //===========================
@@ -32,9 +39,11 @@ typedef enum {
 } WallpaperState;
 
 typedef struct {
-  Texture texture;
   char* path;
   WallpaperState state;
+
+  i32 atlas_idx;
+  Rect uv;
 
   u8* data;
   i32 w, h;
@@ -42,7 +51,6 @@ typedef struct {
 } Wallpaper;
 
 b8 wallpaper_read_from_file(Wallpaper* wp);
-b8 wallpaper_create_texture(Wallpaper* wp);
 void wallpaper_delete(Wallpaper* wp);
 
 // :wallpapers def
@@ -52,16 +60,36 @@ typedef struct {
   i32 capacity;
 } Wallpapers;
 
-typedef struct {
-  Wallpapers* wps;
-  Config* cfg;
-  pthread_mutex_t* wallpapers_mutex;
-} ThreadArgs;
-
 // This will only load up the name of the wallpaper instead of the actual textures
 void wallpapers_new(Wallpapers* wps, Config* cfg);
 void wallpapers_delete(Wallpapers* wps);
-void* load_wallpapers(void* _args);
+
+// :atlas def
+typedef struct {
+  Texture texture;
+  u32 width, height;
+  u32 curr_height;
+} Atlas;
+
+typedef struct {
+  Atlas* items;
+  i32 len;
+  i32 capacity;
+} Atlases;
+
+void atlases_add_new(Atlases* atlases, v2 size);
+b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp);
+void atlases_delete(Atlases* atlases);
+
+// :worker def
+typedef struct {
+  i32 worker_id;
+  Wallpapers* wps;
+  i32 start, end;
+  pthread_mutex_t* wallpapers_mutex;
+} ThreadArgs;
+
+void* worker_load_wallpapers_into_memory(void* _args);
 
 // :app def
 typedef struct {
@@ -70,6 +98,7 @@ typedef struct {
   IMR imr;
 
   Config config;
+  Atlases atlases;
 
   pthread_mutex_t wallpapers_mutex;
   Wallpapers wallpapers;
@@ -77,7 +106,7 @@ typedef struct {
 
 void app_new(App* app);
 void app_delete(App* app);
-void app_spawn_worker(App* app);
+void app_spawn_workers(App* app, i32 workers);
 
 //=============================
 // IMPLEMENTATION BEGINS HERE!
@@ -97,39 +126,39 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
   i32 w, h, c;
-  u8* data = stbi_load(wp->path, &w, &h, &c, 0);
-  if (!data) {
+  i32 rgba = 4;
+  u8* full_data = stbi_load(wp->path, &w, &h, &c, rgba);
+  if (!full_data) {
     log_error("Failed to load file: %s\n", wp->path);
     wp->state = W_FAILED;
     return false;
   }
 
-  wp->data = data;
-  wp->w = w;
-  wp->h = h;
-  wp->channel = c;
-  wp->state = W_LOADED;
-  return true;
-}
+  // Maintaing the aspect ratio
+  f32 scale = (f32)w / (f32)h;
+  i32 tw = THUMBNAIL_MAX;
+  i32 th = (i32)((f32)tw / scale);
 
-b8 wallpaper_create_texture(Wallpaper* wp) {
-  panic(wp, "Parameter wp cannot be NULL");
-
-  Texture tex = {0};
-  if (!texture_from_data(&tex, wp->w, wp->h, wp->data, wp->channel)) {
+  u8* thumb_data = mem_alloc(tw * th * 4);
+  if (!thumb_data) {
+    stbi_image_free(full_data);
     wp->state = W_FAILED;
     return false;
   }
 
-  stbi_image_free(wp->data);
+  stbir_resize_uint8_linear(full_data, w, h, 0, thumb_data, tw, th, 0, STBIR_RGBA);
+  stbi_image_free(full_data);
 
-  wp->texture = tex;
-  wp->state = W_READY;
+  wp->data = thumb_data;
+  wp->w = tw;
+  wp->h = th;
+  wp->channel = TEX_RGBA;
+  wp->state = W_LOADED;
   return true;
 }
 
 void wallpaper_delete(Wallpaper* wp) {
-  texture_delete(wp->texture);
+  mem_free(wp->data);
   free(wp->path);
 }
 
@@ -169,30 +198,83 @@ void wallpapers_delete(Wallpapers* wps) {
   mem_free(wps->items);
 }
 
-void* load_wallpapers_into_memory(void* _args) {
+// :atlas impl
+void atlases_add_new(Atlases* atlases, v2 size) {
+  Atlas atlas = {
+    .texture = (Texture) {0},
+    .width = size.x,
+    .height = size.y,
+    .curr_height = 0,
+  };
+
+  panic(
+    texture_from_data(&atlas.texture, atlas.width, atlas.height, NULL, TEX_RGBA),
+    "Failed to create the first atlas"
+  );
+
+  da_append(atlases, atlas);
+}
+
+b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
+  Atlas* atlas = &atlases->items[atlases->len - 1];
+
+  // Create a new atlas when it runs out of space
+  if (wp->h > atlas->height - atlas->curr_height) {
+    atlases_add_new(atlases, ATLAS_SIZE);
+    atlas = &atlases->items[atlases->len - 1];
+  }
+
+  i32 y0 = atlas->curr_height; 
+
+  // Update the atlas
+  texture_update(
+    atlas->texture,
+    0,
+    (v2) { 0, y0 },
+    (v2) { wp->w, wp->h },
+    wp->data
+  );
+
+  // Adjust the atlas pointer
+  atlas->curr_height += wp->h;
+
+  wp->atlas_idx = atlases->len - 1;
+  wp->uv = (Rect) {
+    0.0f,
+    (f32) y0 / (f32) atlas->height,
+    (f32) wp->w / (f32) atlas->width,
+    (f32) wp->h / (f32) atlas->height
+  };
+  wp->state = W_READY;
+  return true;
+}
+
+void atlases_delete(Atlases* atlases) {
+  for (i32 i = 0; i < atlases->len; i++) {
+    texture_delete(atlases->items[i].texture);
+  }
+}
+
+// :worker impl
+void* worker_load_wallpapers_into_memory(void* _args) {
   ThreadArgs* args = (ThreadArgs*) _args;
   Wallpapers* wps = args->wps;
-  Config* cfg = args->cfg;
   pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
 
-  for (i32 i = 0; i < wps->len; i++) {
+  for (i32 i = args->start; i < args->end; i++) {
     Wallpaper* wp = &wps->items[i];
 
-    // NOTE(slok): Currently the mutex is not used rn
-    //pthread_mutex_lock(wallpapers_mutex);
     if (wp->state == W_PENDING) {
       if (!wallpaper_read_from_file(wp)) {
         log_warn("Skipping: %s\n", wp->path);
-        //pthread_mutex_unlock(wallpapers_mutex);
         continue;
       }
     }
 
     log_info("Loaded: %s\n", wp->path);
-    //pthread_mutex_unlock(wallpapers_mutex);
   }
 
-  log_sucess("Done Loading\n");
+  log_sucess("Worker Done: %d\n", args->worker_id);
 
   return NULL;
 }
@@ -226,6 +308,10 @@ void app_new(App* app) {
   app->config = (Config) {0};
   config_new(&app->config);
 
+  // Create the first atlas
+  app->atlases = (Atlases) {0};
+  atlases_add_new(&app->atlases, ATLAS_SIZE);
+
   // Setup the wallpapers and mutex
   app->wallpapers_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
   app->wallpapers = (Wallpapers) {0};
@@ -233,28 +319,42 @@ void app_new(App* app) {
 }
 
 void app_delete(App* app) {
-  config_delete(&app->config);
+  atlases_delete(&app->atlases);
   wallpapers_delete(&app->wallpapers);
+  config_delete(&app->config);
 
   imr_delete(&app->imr);
   window_delete(app->window);
 }
 
-void app_spawn_worker(App* app) {
-  ThreadArgs* args = mem_alloc(sizeof(ThreadArgs));
-  args->wps = &app->wallpapers;
-  args->cfg = &app->config;
-  args->wallpapers_mutex = &app->wallpapers_mutex;
+void app_spawn_workers(App* app, i32 workers) {
+  i32 per_worker = app->wallpapers.len / workers;
+  i32 remainder = app->wallpapers.len % workers;
 
-  pthread_t thread;
-  pthread_create(&thread, NULL, load_wallpapers_into_memory, (void*) args);
+  i32 start = 0;
+  for (i32 i = 0; i < workers; i++) {
+    i32 chunk = per_worker + (i < remainder ? 1 : 0);
+    i32 end = start + chunk;
+
+    ThreadArgs* args = mem_alloc(sizeof(ThreadArgs));
+    args->worker_id = i + 1;
+    args->wps = &app->wallpapers;
+    args->wallpapers_mutex = &app->wallpapers_mutex;
+    args->start = start;
+    args->end = end;
+
+    pthread_t thread;
+    pthread_create(&thread, NULL, worker_load_wallpapers_into_memory, (void*) args);
+
+    start = end;
+  }
 }
 
 // :main
 int main() {
   App app = {0};
   app_new(&app);
-  app_spawn_worker(&app);
+  app_spawn_workers(&app, 20);
 
   while (!app.window.should_close) {
     imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
@@ -264,7 +364,6 @@ int main() {
 
     imr_begin(&app.imr);
 
-    v2 size = { 300, 300 };
     f32 gap = 50.0f;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
       Wallpaper* wp = &app.wallpapers.items[i];
@@ -274,21 +373,23 @@ int main() {
           break;
 
         case W_LOADED:
-          if (!wallpaper_create_texture(wp)) {
+          if (!atlases_add_wallpaper(&app.atlases, wp)) {
             log_error("Failed to create texture for: %s\n", basename(wp->path));
             continue;
           }
-          log_info("TEXTURE: %d: %s\n", wp->texture.id, basename(wp->path));
+          log_info("TEXTURED: %s\n", basename(wp->path));
           break;
 
         case W_READY:
-          texture_bind(wp->texture);
+          Atlas* at = &app.atlases.items[wp->atlas_idx];
+          v2 size = { wp->w, wp->h };
+          texture_bind(at->texture);
           imr_push_quad_tex_rounded(
             &app.imr,
-            (v3) { i * size.x + gap, 100, 0 },
+            (v3) { i * size.x, 0 },
             size,
-            (Rect) { 0, 0, 1, 1 },
-            wp->texture.id,
+            wp->uv,
+            at->texture.id,
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
             20.0f
