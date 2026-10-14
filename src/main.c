@@ -54,11 +54,13 @@ typedef struct {
   Wallpaper* items;    // This owns the Wallpaper memory
   i32 len;
   i32 capacity;
+  i32 top;
 } Wallpapers;
 
 // This will only load up the name of the wallpaper instead of the actual textures
 void wallpapers_new(Wallpapers* wps, Config* cfg);
 void wallpapers_delete(Wallpapers* wps);
+Wallpaper* wallpapers_dequeue(Wallpapers* wps);
 
 // :atlas def
 typedef struct {
@@ -208,6 +210,11 @@ void wallpapers_delete(Wallpapers* wps) {
   mem_free(wps->items);
 }
 
+Wallpaper* wallpapers_dequeue(Wallpapers* wps) {
+  if (wps->top >= wps->len) return NULL;
+  return &wps->items[wps->top++];
+}
+
 // :atlas impl
 void atlases_add_new(Atlases* atlases, v2 size) {
   Atlas atlas = {
@@ -263,7 +270,7 @@ void atlases_delete(Atlases* atlases) {
   for (i32 i = 0; i < atlases->len; i++) {
     texture_delete(atlases->items[i].texture);
   }
-  mem_free(atlases);
+  mem_free(atlases->items);
 }
 
 // :worker impl
@@ -272,17 +279,20 @@ void* worker_load_wallpapers_into_memory(void* _args) {
   Wallpapers* wps = args->wps;
   pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
 
-  for (i32 i = args->start; i < args->end; i++) {
-    Wallpaper* wp = &wps->items[i];
+  while (true) {
+    pthread_mutex_lock(wallpapers_mutex);
+    Wallpaper* wp = wallpapers_dequeue(wps);
+    pthread_mutex_unlock(wallpapers_mutex);
+
+    if (!wp) break;
 
     if (wp->state == W_PENDING) {
       if (!wallpaper_read_from_file(wp)) {
         log_warn("Skipping: %s\n", wp->path);
         continue;
       }
+      log_info("Loaded: %s\n", wp->path);
     }
-
-    log_info("Loaded: %s\n", wp->path);
   }
 
   log_sucess("Worker Done: %d\n", args->worker_id);
@@ -415,7 +425,7 @@ int main() {
     while (event_poll(app.window, &event)) {
       switch (event.type) {
         case WINDOW_RESIZE:
-          // Create a new camera during resize
+          // Adjust the camaera boundaries during resize
           app.camera.boundary.right = event.e.window_size.x;
           app.camera.boundary.bottom = event.e.window_size.y;
         break;
@@ -438,6 +448,14 @@ int main() {
 
       switch (wp->state) {
         case W_PENDING:
+          imr_push_quad_rounded(
+            &app.imr,
+            (v3) { wp->x, wp->y, 0 },
+            (v2) { wp->w, wp->h },
+            m4_identity(),
+            (v4) { 1, 1, 1, 1 },
+            20.0f
+          );
           break;
 
         case W_LOADED: {
