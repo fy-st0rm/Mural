@@ -370,6 +370,7 @@ static v2 dgl_to_dp_coords(v2 dp, u32 WIN_WIDTH, u32 WIN_HEIGHT) {
 typedef struct {
   b8 fullscreen;
   b8 vsync;
+  b8 resizable;
 } WindowSettings;
 
 typedef struct {
@@ -405,6 +406,8 @@ typedef enum {
   MOUSE_BUTTON_DOWN,
   MOUSE_BUTTON_UP,
   MOUSE_MOTION,
+
+  WINDOW_RESIZE,
 } EventType;
 
 typedef enum {
@@ -419,6 +422,7 @@ typedef struct {
     u32 key;
     MouseButton button;
     v2 mouse_pos;
+    v2 window_size;
   } e;
 } Event;
 
@@ -1388,7 +1392,7 @@ b8 window_new(Window* window, const char* title, u32 width, u32 height, WindowSe
     glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
   }
 
-  glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+  glfwWindowHint(GLFW_RESIZABLE, settings.resizable);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
@@ -1428,6 +1432,7 @@ void window_delete(Window window) {
 }
 
 void window_update(Window* window) {
+  glfwGetWindowSize(window->glfw_window, &window->width, &window->height);
   window->should_close = glfwWindowShouldClose(window->glfw_window);
   glfwSwapBuffers(window->glfw_window);
   glfwPollEvents();
@@ -1522,10 +1527,18 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
   event_enqueue(&ctx->e_queue, event);
 }
 
+void window_resize_callback(GLFWwindow* window, i32 width, i32 height) {
+  Event event = { 0 };
+  event.e.window_size = (v2) { width, height };
+  event.type = WINDOW_RESIZE;
+  event_enqueue(&ctx->e_queue, event);
+}
+
 b8 event_poll(Window window, Event* event) {
   glfwSetKeyCallback(window.glfw_window, key_callback);
   glfwSetMouseButtonCallback(window.glfw_window, mouse_button_callback);
   glfwSetCursorPosCallback(window.glfw_window, cursor_position_callback);
+  glfwSetWindowSizeCallback(window.glfw_window, window_resize_callback);
 
   if (ctx->e_queue.front != ctx->e_queue.back) {
     *event = event_dequeue(&ctx->e_queue);  // Dequeue the next event

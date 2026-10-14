@@ -4,8 +4,8 @@
 #include <libgen.h>
 #include <pthread.h>
 
-#define THUMBNAIL_MAX 100
-#define ATLAS_SIZE (v2) { THUMBNAIL_MAX, 10000 }
+#define THUMB_W 100
+#define ATLAS_SIZE (v2) { THUMB_W, 10000 }
 
 //===========================
 // DEFINITIONS BEGINS HERE!
@@ -41,6 +41,7 @@ typedef struct {
   Rect uv;
 
   u8* data;
+  f32 x, y;
   i32 w, h;
   i32 channel;
 } Wallpaper;
@@ -102,6 +103,7 @@ typedef struct {
 void app_new(App* app);
 void app_delete(App* app);
 void app_spawn_workers(App* app, i32 workers);
+void app_create_layout(App* app);
 
 //=============================
 // IMPLEMENTATION BEGINS HERE!
@@ -120,6 +122,7 @@ void config_delete(Config* cfg) {
 b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
+  // Loading the full image
   i32 w, h, c;
   i32 rgba = 4;
   u8* full_data = stbi_load(wp->path, &w, &h, &c, rgba);
@@ -129,24 +132,20 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
     return false;
   }
 
-  // Maintaing the aspect ratio
-  f32 scale = (f32)w / (f32)h;
-  i32 tw = THUMBNAIL_MAX;
-  i32 th = (i32)((f32)tw / scale);
-
-  u8* thumb_data = mem_alloc(tw * th * 4);
+  // Creating memory for scaled down image
+  u8* thumb_data = mem_alloc(wp->w * wp->h * 4);
   if (!thumb_data) {
     stbi_image_free(full_data);
     wp->state = W_FAILED;
     return false;
   }
 
-  stbir_resize_uint8_linear(full_data, w, h, 0, thumb_data, tw, th, 0, STBIR_RGBA);
+  // Resizing the image
+  stbir_resize_uint8_linear(full_data, w, h, 0, thumb_data, wp->w, wp->h, 0, STBIR_RGBA);
   stbi_image_free(full_data);
 
+  // Saving the data
   wp->data = thumb_data;
-  wp->w = tw;
-  wp->h = th;
   wp->channel = TEX_RGBA;
   wp->state = W_LOADED;
   return true;
@@ -169,13 +168,29 @@ void wallpapers_new(Wallpapers* wps, Config* cfg) {
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
+
+      // Skip . & ..
+      const char* dot = strrchr(entry->d_name, '.');
+      if (entry->d_name[0] == '.') continue;  
+
       char file_path[PATH_MAX];
       sprintf(file_path, "%s/%s", path, entry->d_name);
 
       Wallpaper wp = {
-        .path  = strdup(file_path),
-        .state = W_PENDING,
+        .path = strdup(file_path),
+        .state = W_PENDING
       };
+
+      // Query the files width and height of image files
+      i32 fw, fh, fc;
+      if (!stbi_info(file_path, &fw, &fh, &fc)) {
+        continue;
+      }
+
+      // Making it smaller size
+      wp.w = THUMB_W;
+      wp.h = (i32)((f32) fh * THUMB_W / fw);
+      if (wp.h < 1) wp.h = 1;
       da_append(wps, wp);
 
       log_info("Found: %s\n", file_path);
@@ -248,6 +263,7 @@ void atlases_delete(Atlases* atlases) {
   for (i32 i = 0; i < atlases->len; i++) {
     texture_delete(atlases->items[i].texture);
   }
+  mem_free(atlases);
 }
 
 // :worker impl
@@ -280,7 +296,8 @@ void app_new(App* app) {
     &app->window,
     "Mural", 800, 600, (WindowSettings) {
       .fullscreen = false,
-      .vsync = true,
+      .vsync = false,
+      .resizable = true,
     }
   ), "Failed to create window\n");
 
@@ -289,9 +306,9 @@ void app_new(App* app) {
     1,
     (OCamera_Boundary) {
       .left   = 0,
-      .right  = 800,
+      .right  = app->window.width,
       .top    = 0,
-      .bottom = 600,
+      .bottom = app->window.height,
       .near   = -1.0f,
       .far    = 1000.0f,
     }
@@ -347,144 +364,77 @@ void app_spawn_workers(App* app, i32 workers) {
   }
 }
 
-#define CELL_W   100.0f
-#define CELL_H   100.0f
-#define GAP      20.0f
-#define MARGIN   20.0f
-#define MAX_UPLOADS_PER_FRAME 4
+void app_create_layout(App* app) {
+  f32 gap = 10.0f;
+  f32 x = gap;
+  f32 y = 0;
 
-// Crop the atlas UV so the image covers the cell without stretching
-static Rect uv_cover(Rect uv, f32 img_w, f32 img_h, f32 cell_w, f32 cell_h) {
-  f32 img_aspect  = img_w / img_h;
-  f32 cell_aspect = cell_w / cell_h;
+  u32 window_width = app->window.width;
+  i32 per_row = window_width / (THUMB_W + gap);
 
-  if (img_aspect > cell_aspect) {          // image is wider: crop left/right
-    f32 keep = cell_aspect / img_aspect;
-    uv.x += uv.w * (1.0f - keep) * 0.5f;
-    uv.w *= keep;
-  } else {                                 // image is taller: crop top/bottom
-    f32 keep = img_aspect / cell_aspect;
-    uv.y += uv.h * (1.0f - keep) * 0.5f;
-    uv.h *= keep;
-  }
-  return uv;
-}
+  i32 r = 0;
+  i32 max_h = 0;
+  for (i32 i = 0; i < app->wallpapers.len; i++) {
+    Wallpaper* wp = &app->wallpapers.items[i];
 
-int main() {
-  App app = {0};
-  app_new(&app);
-  app_spawn_workers(&app, 8);
-
-  f32 scroll_y = 0;   // hook this up to a GLFW scroll callback later
-
-  while (!app.window.should_close) {
-    imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
-
-    m4 mvp = ocamera_calc_mvp(&app.camera);
-    imr_update_mvp(&app.imr, mvp);
-
-    // ---- 1. Upload pass (budgeted, no layout involved) ----
-    i32 uploads = 0;
-    for (i32 i = 0; i < app.wallpapers.len && uploads < MAX_UPLOADS_PER_FRAME; i++) {
-      Wallpaper* wp = &app.wallpapers.items[i];
-      if (wp->state != W_LOADED) continue;
-
-      uploads++;
-      if (!atlases_add_wallpaper(&app.atlases, wp)) {
-        log_error("Failed to create texture for: %s\n", basename(wp->path));
-        wp->state = W_FAILED;
-      }
+    // Capture the max height for the row
+    if (wp->h > max_h) {
+      max_h = wp->h;
     }
 
-    // ---- 2. Static grid layout, derived only from the index ----
-    i32 n       = app.wallpapers.len;
-    f32 win_w   = (f32) app.window.width;
-    f32 win_h   = (f32) app.window.height;
-    f32 stride_x = CELL_W + GAP;
-    f32 stride_y = CELL_H + GAP;
+    wp->x = x;
+    wp->y = y; 
 
-    i32 cols = (i32)((win_w - 2 * MARGIN + GAP) / stride_x);
-    if (cols < 1) cols = 1;
-    i32 rows = (n + cols - 1) / cols;
+    // Increase the x and element in row
+    x += THUMB_W + gap;
+    r++;
 
-    // Clamp scrolling to the content
-    f32 content_h = MARGIN * 2 + rows * stride_y - GAP;
-    f32 max_scroll = content_h - win_h;
-    if (max_scroll < 0) max_scroll = 0;
-    if (scroll_y < 0) scroll_y = 0;
-    if (scroll_y > max_scroll) scroll_y = max_scroll;
+    // If element in row is greater than per row
+    if (r >= per_row) {
+      // Increase y
+      y += max_h + gap;
 
-    // Only visit rows that are on screen
-    i32 first_row = (i32)((scroll_y - MARGIN) / stride_y);
-    i32 last_row  = (i32)((scroll_y + win_h - MARGIN) / stride_y);
-    if (first_row < 0) first_row = 0;
-    if (last_row >= rows) last_row = rows - 1;
-
-    imr_begin(&app.imr);
-
-    for (i32 row = first_row; row <= last_row; row++) {
-      for (i32 col = 0; col < cols; col++) {
-        i32 i = row * cols + col;
-        if (i >= n) break;
-
-        Wallpaper* wp = &app.wallpapers.items[i];
-        v3 pos = {
-          MARGIN + col * stride_x,
-          MARGIN + row * stride_y - scroll_y,
-          0
-        };
-        v2 size = { CELL_W, CELL_H };
-
-        if (wp->state == W_READY) {
-          Atlas* at = &app.atlases.items[wp->atlas_idx];
-          texture_bind(at->texture);
-          imr_push_quad_tex_rounded(
-            &app.imr, pos, size,
-            uv_cover(wp->uv, wp->w, wp->h, CELL_W, CELL_H),
-            at->texture.id,
-            m4_identity(), (v4){ 1, 1, 1, 1 }, 20.0f
-          );
-        } else {
-          // Placeholder keeps the grid visible while loading
-          v4 c = (wp->state == W_FAILED) ? (v4){ 0.5f, 0.2f, 0.2f, 1 }
-                                         : (v4){ 0.35f, 0.35f, 0.35f, 1 };
-          imr_push_quad_rounded(&app.imr, pos, size, m4_identity(), c, 20.0f);
-        }
-      }
+      // Reset
+      x = gap;
+      max_h = 0;
+      r = 0;
     }
-
-    imr_end(&app.imr);
-    window_update(&app.window);
   }
-
-  app_delete(&app);
-  return 0;
 }
 
 // :main
-/*
 int main() {
   App app = {0};
   app_new(&app);
-  app_spawn_workers(&app, 20);
+  app_spawn_workers(&app, 5);
 
   while (!app.window.should_close) {
+
+    // Event loop
+    Event event = {0};
+    while (event_poll(app.window, &event)) {
+      switch (event.type) {
+        case WINDOW_RESIZE:
+          // Create a new camera during resize
+          app.camera.boundary.right = event.e.window_size.x;
+          app.camera.boundary.bottom = event.e.window_size.y;
+        break;
+      }
+    }
+
+    // Rendering
     imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
+    glViewport(0, 0, app.window.width, app.window.height);
 
     m4 mvp = ocamera_calc_mvp(&app.camera);
     imr_update_mvp(&app.imr, mvp);
 
+    app_create_layout(&app);
+
     imr_begin(&app.imr);
 
-    f32 gap = 0.0f;
-
-    f32 x = 0;
-    f32 y = 0;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
       Wallpaper* wp = &app.wallpapers.items[i];
-
-      v3 pos = { x, y, 0 };
-      // print_v3(pos);
 
       switch (wp->state) {
         case W_PENDING:
@@ -500,12 +450,11 @@ int main() {
 
         case W_READY: {
           Atlas* at = &app.atlases.items[wp->atlas_idx];
-          v2 size = { wp->w, wp->h };
           texture_bind(at->texture);
           imr_push_quad_tex_rounded(
             &app.imr,
-            pos,
-            size,
+            (v3) { wp->x, wp->y, 0 },
+            (v2) { wp->w, wp->h },
             wp->uv,
             at->texture.id,
             m4_identity(),
@@ -518,14 +467,6 @@ int main() {
           break;
       }
 
-
-      x += wp->w + gap;
-      if (x + wp->w > 800) {
-        x = 0;
-        y += wp->h + gap;
-      }
-
-
     }
 
     imr_end(&app.imr);
@@ -536,4 +477,3 @@ int main() {
   app_delete(&app);
   return 0;
 }
-*/
