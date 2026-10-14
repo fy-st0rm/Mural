@@ -3,6 +3,8 @@
 #include <limits.h>
 #include <libgen.h>
 #include <pthread.h>
+#include <jpeglib.h>
+#include <setjmp.h>
 
 #define THUMB_W 150
 #define ATLAS_SIZE (v2) { THUMB_W, 10000 }
@@ -122,12 +124,82 @@ void config_delete(Config* cfg) {
 }
 
 // :wallpaper impl
+typedef struct {
+  struct jpeg_error_mgr pub;
+  jmp_buf jb;
+} JpegErrorMgr;
+
+static void jpeg_error_exit(j_common_ptr cinfo) {
+  JpegErrorMgr* err = (JpegErrorMgr*) cinfo->err;
+  longjmp(err->jb, 1);
+}
+
+static u8* jpeg_load_scaled(const char* path, i32 min_w, i32* out_w, i32* out_h) {
+  FILE* file = fopen(path, "rb");
+  if (!file) return NULL;
+
+  struct jpeg_decompress_struct cinfo;
+  JpegErrorMgr jerr;
+  volatile u8* pixels = NULL;
+
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = jpeg_error_exit;
+
+  if (setjmp(jerr.jb)) {
+    jpeg_destroy_decompress(&cinfo);
+    fclose(file);
+    free((void*) pixels);
+    return NULL;
+  }
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_stdio_src(&cinfo, file);
+  jpeg_read_header(&cinfo, TRUE);
+
+  // Pick the largest downscale denominator that is still >= min_w
+  i32 denom = 1;
+  if ((i32) cinfo.image_width / 2 >= min_w) denom = 2;
+  if ((i32) cinfo.image_width / 4 >= min_w) denom = 4;
+  if ((i32) cinfo.image_width / 8 >= min_w) denom = 8;
+
+  cinfo.scale_num = 1;
+  cinfo.scale_denom = denom;
+  cinfo.out_color_space = JCS_EXT_RGBA;
+
+  jpeg_start_decompress(&cinfo);
+
+  i32 w = cinfo.output_width;
+  i32 h = cinfo.output_height;
+
+  u8* buf = malloc(w * h * 4);
+  if (!buf) {
+    jpeg_destroy_decompress(&cinfo);
+    fclose(file);
+    return NULL;
+  }
+  pixels = buf;
+
+  while (cinfo.output_scanline < cinfo.output_height) {
+    u8* row = buf + (size_t) cinfo.output_scanline * w * 4;
+    jpeg_read_scanlines(&cinfo, &row, 1);
+  }
+
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+  fclose(file);
+
+  *out_w = w;
+  *out_h = h;
+  return buf;
+}
+
 b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
   // Loading the full image, the GPU scales it into the atlas later
   i32 w, h, c;
-  u8* full_data = stbi_load(wp->path, &w, &h, &c, 4);
+  u8* full_data = jpeg_load_scaled(wp->path, THUMB_W * 2, &w, &h);
+  if (!full_data) full_data = stbi_load(wp->path, &w, &h, &c, 4);
   if (!full_data) {
     log_error("Failed to load file: %s\n", wp->path);
     wp->state = W_FAILED;
@@ -144,7 +216,7 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
 }
 
 void wallpaper_delete(Wallpaper* wp) {
-  stbi_image_free(wp->data);
+  free(wp->data);
   free(wp->path);
 }
 
@@ -259,7 +331,7 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
   GLCall(glDeleteFramebuffers(1, &src_fbo));
   texture_delete(full);
 
-  stbi_image_free(wp->data);
+  free(wp->data);
   wp->data = NULL;
 
   // Adjust the atlas pointer
@@ -426,7 +498,7 @@ void app_create_layout(App* app) {
 int main() {
   App app = {0};
   app_new(&app);
-  app_spawn_workers(&app, 5);
+  app_spawn_workers(&app, 20);
 
   while (!app.window.should_close) {
 

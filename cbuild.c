@@ -20,7 +20,8 @@ int main(int argc, char** argv) {
     "GL",
     "GLU",
     "m",
-    "pthread"
+    "pthread",
+    "jpeg"
   );
   cbuild_srcs(
     &build,
