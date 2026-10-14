@@ -1,16 +1,11 @@
-#define BASE_IMPLEMENTATION
 #include "base.h"
 #include <dirent.h>
 #include <limits.h>
 #include <libgen.h>
 #include <pthread.h>
 
-#define THUMBNAIL_MAX 400
-#define ATLAS_SIZE (v2) { THUMBNAIL_MAX, 1000 }
-
-// TODOS:
-// - Load only thumbnails
-// - Create a atlas for thumbnails (make atlas per thread so that we can keep max threads at 31)
+#define THUMBNAIL_MAX 100
+#define ATLAS_SIZE (v2) { THUMBNAIL_MAX, 10000 }
 
 //===========================
 // DEFINITIONS BEGINS HERE!
@@ -319,6 +314,8 @@ void app_new(App* app) {
 }
 
 void app_delete(App* app) {
+  log_info("Atlases used: %d\n", app->atlases.len);
+
   atlases_delete(&app->atlases);
   wallpapers_delete(&app->wallpapers);
   config_delete(&app->config);
@@ -350,7 +347,122 @@ void app_spawn_workers(App* app, i32 workers) {
   }
 }
 
+#define CELL_W   100.0f
+#define CELL_H   100.0f
+#define GAP      20.0f
+#define MARGIN   20.0f
+#define MAX_UPLOADS_PER_FRAME 4
+
+// Crop the atlas UV so the image covers the cell without stretching
+static Rect uv_cover(Rect uv, f32 img_w, f32 img_h, f32 cell_w, f32 cell_h) {
+  f32 img_aspect  = img_w / img_h;
+  f32 cell_aspect = cell_w / cell_h;
+
+  if (img_aspect > cell_aspect) {          // image is wider: crop left/right
+    f32 keep = cell_aspect / img_aspect;
+    uv.x += uv.w * (1.0f - keep) * 0.5f;
+    uv.w *= keep;
+  } else {                                 // image is taller: crop top/bottom
+    f32 keep = img_aspect / cell_aspect;
+    uv.y += uv.h * (1.0f - keep) * 0.5f;
+    uv.h *= keep;
+  }
+  return uv;
+}
+
+int main() {
+  App app = {0};
+  app_new(&app);
+  app_spawn_workers(&app, 8);
+
+  f32 scroll_y = 0;   // hook this up to a GLFW scroll callback later
+
+  while (!app.window.should_close) {
+    imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
+
+    m4 mvp = ocamera_calc_mvp(&app.camera);
+    imr_update_mvp(&app.imr, mvp);
+
+    // ---- 1. Upload pass (budgeted, no layout involved) ----
+    i32 uploads = 0;
+    for (i32 i = 0; i < app.wallpapers.len && uploads < MAX_UPLOADS_PER_FRAME; i++) {
+      Wallpaper* wp = &app.wallpapers.items[i];
+      if (wp->state != W_LOADED) continue;
+
+      uploads++;
+      if (!atlases_add_wallpaper(&app.atlases, wp)) {
+        log_error("Failed to create texture for: %s\n", basename(wp->path));
+        wp->state = W_FAILED;
+      }
+    }
+
+    // ---- 2. Static grid layout, derived only from the index ----
+    i32 n       = app.wallpapers.len;
+    f32 win_w   = (f32) app.window.width;
+    f32 win_h   = (f32) app.window.height;
+    f32 stride_x = CELL_W + GAP;
+    f32 stride_y = CELL_H + GAP;
+
+    i32 cols = (i32)((win_w - 2 * MARGIN + GAP) / stride_x);
+    if (cols < 1) cols = 1;
+    i32 rows = (n + cols - 1) / cols;
+
+    // Clamp scrolling to the content
+    f32 content_h = MARGIN * 2 + rows * stride_y - GAP;
+    f32 max_scroll = content_h - win_h;
+    if (max_scroll < 0) max_scroll = 0;
+    if (scroll_y < 0) scroll_y = 0;
+    if (scroll_y > max_scroll) scroll_y = max_scroll;
+
+    // Only visit rows that are on screen
+    i32 first_row = (i32)((scroll_y - MARGIN) / stride_y);
+    i32 last_row  = (i32)((scroll_y + win_h - MARGIN) / stride_y);
+    if (first_row < 0) first_row = 0;
+    if (last_row >= rows) last_row = rows - 1;
+
+    imr_begin(&app.imr);
+
+    for (i32 row = first_row; row <= last_row; row++) {
+      for (i32 col = 0; col < cols; col++) {
+        i32 i = row * cols + col;
+        if (i >= n) break;
+
+        Wallpaper* wp = &app.wallpapers.items[i];
+        v3 pos = {
+          MARGIN + col * stride_x,
+          MARGIN + row * stride_y - scroll_y,
+          0
+        };
+        v2 size = { CELL_W, CELL_H };
+
+        if (wp->state == W_READY) {
+          Atlas* at = &app.atlases.items[wp->atlas_idx];
+          texture_bind(at->texture);
+          imr_push_quad_tex_rounded(
+            &app.imr, pos, size,
+            uv_cover(wp->uv, wp->w, wp->h, CELL_W, CELL_H),
+            at->texture.id,
+            m4_identity(), (v4){ 1, 1, 1, 1 }, 20.0f
+          );
+        } else {
+          // Placeholder keeps the grid visible while loading
+          v4 c = (wp->state == W_FAILED) ? (v4){ 0.5f, 0.2f, 0.2f, 1 }
+                                         : (v4){ 0.35f, 0.35f, 0.35f, 1 };
+          imr_push_quad_rounded(&app.imr, pos, size, m4_identity(), c, 20.0f);
+        }
+      }
+    }
+
+    imr_end(&app.imr);
+    window_update(&app.window);
+  }
+
+  app_delete(&app);
+  return 0;
+}
+
 // :main
+/*
 int main() {
   App app = {0};
   app_new(&app);
@@ -364,29 +476,35 @@ int main() {
 
     imr_begin(&app.imr);
 
-    f32 gap = 50.0f;
+    f32 gap = 0.0f;
+
+    f32 x = 0;
+    f32 y = 0;
     for (i32 i = 0; i < app.wallpapers.len; i++) {
       Wallpaper* wp = &app.wallpapers.items[i];
+
+      v3 pos = { x, y, 0 };
+      // print_v3(pos);
 
       switch (wp->state) {
         case W_PENDING:
           break;
 
-        case W_LOADED:
+        case W_LOADED: {
           if (!atlases_add_wallpaper(&app.atlases, wp)) {
             log_error("Failed to create texture for: %s\n", basename(wp->path));
             continue;
           }
           log_info("TEXTURED: %s\n", basename(wp->path));
-          break;
+        };
 
-        case W_READY:
+        case W_READY: {
           Atlas* at = &app.atlases.items[wp->atlas_idx];
           v2 size = { wp->w, wp->h };
           texture_bind(at->texture);
           imr_push_quad_tex_rounded(
             &app.imr,
-            (v3) { i * size.x, 0 },
+            pos,
             size,
             wp->uv,
             at->texture.id,
@@ -394,11 +512,20 @@ int main() {
             (v4) { 1, 1, 1, 1 },
             20.0f
           );
-          break;
+        } break;
 
         case W_FAILED:
           break;
       }
+
+
+      x += wp->w + gap;
+      if (x + wp->w > 800) {
+        x = 0;
+        y += wp->h + gap;
+      }
+
+
     }
 
     imr_end(&app.imr);
@@ -409,3 +536,4 @@ int main() {
   app_delete(&app);
   return 0;
 }
+*/

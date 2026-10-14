@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     &build,
     "src/external/glew/src/glew.c",
     "src/external/glfw/src/glfw.c",
+    "src/base.c",
     "src/main.c"
   );
 
