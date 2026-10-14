@@ -4,7 +4,7 @@
 #include <libgen.h>
 #include <pthread.h>
 
-#define THUMB_W 100
+#define THUMB_W 150
 #define ATLAS_SIZE (v2) { THUMB_W, 10000 }
 
 //===========================
@@ -43,6 +43,7 @@ typedef struct {
   u8* data;
   f32 x, y;
   i32 w, h;
+  i32 full_w, full_h;
   i32 channel;
 } Wallpaper;
 
@@ -64,7 +65,7 @@ Wallpaper* wallpapers_dequeue(Wallpapers* wps);
 
 // :atlas def
 typedef struct {
-  Texture texture;
+  FBO fbo;
   u32 width, height;
   u32 curr_height;
 } Atlas;
@@ -124,37 +125,26 @@ void config_delete(Config* cfg) {
 b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
-  // Loading the full image
+  // Loading the full image, the GPU scales it into the atlas later
   i32 w, h, c;
-  i32 rgba = 4;
-  u8* full_data = stbi_load(wp->path, &w, &h, &c, rgba);
+  u8* full_data = stbi_load(wp->path, &w, &h, &c, 4);
   if (!full_data) {
     log_error("Failed to load file: %s\n", wp->path);
     wp->state = W_FAILED;
     return false;
   }
 
-  // Creating memory for scaled down image
-  u8* thumb_data = mem_alloc(wp->w * wp->h * 4);
-  if (!thumb_data) {
-    stbi_image_free(full_data);
-    wp->state = W_FAILED;
-    return false;
-  }
-
-  // Resizing the image
-  stbir_resize_uint8_linear(full_data, w, h, 0, thumb_data, wp->w, wp->h, 0, STBIR_RGBA);
-  stbi_image_free(full_data);
-
   // Saving the data
-  wp->data = thumb_data;
+  wp->data = full_data;
+  wp->full_w = w;
+  wp->full_h = h;
   wp->channel = TEX_RGBA;
   wp->state = W_LOADED;
   return true;
 }
 
 void wallpaper_delete(Wallpaper* wp) {
-  mem_free(wp->data);
+  stbi_image_free(wp->data);
   free(wp->path);
 }
 
@@ -218,14 +208,14 @@ Wallpaper* wallpapers_dequeue(Wallpapers* wps) {
 // :atlas impl
 void atlases_add_new(Atlases* atlases, v2 size) {
   Atlas atlas = {
-    .texture = (Texture) {0},
+    .fbo = (FBO) {0},
     .width = size.x,
     .height = size.y,
     .curr_height = 0,
   };
 
   panic(
-    texture_from_data(&atlas.texture, atlas.width, atlas.height, NULL, TEX_RGBA),
+    fbo_new(&atlas.fbo, atlas.width, atlas.height),
     "Failed to create the first atlas"
   );
 
@@ -243,14 +233,34 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
 
   i32 y0 = atlas->curr_height; 
 
-  // Update the atlas
-  texture_update(
-    atlas->texture,
-    0,
-    (v2) { 0, y0 },
-    (v2) { wp->w, wp->h },
-    wp->data
-  );
+  // Upload the full-size image into a scratch texture
+  Texture full;
+  if (!texture_from_data(&full, wp->full_w, wp->full_h, wp->data, TEX_RGBA)) {
+    return false;
+  }
+
+  // Blit it scaled into the atlas, the GPU does the resize
+  u32 src_fbo;
+  GLCall(glGenFramebuffers(1, &src_fbo));
+  GLCall(glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo));
+  GLCall(glFramebufferTexture2D(
+    GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+    GL_TEXTURE_2D, full.id, 0
+  ));
+
+  GLCall(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, atlas->fbo.id));
+  GLCall(glBlitFramebuffer(
+    0, 0, wp->full_w, wp->full_h,
+    0, y0, wp->w, y0 + wp->h,
+    GL_COLOR_BUFFER_BIT, GL_LINEAR
+  ));
+
+  GLCall(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+  GLCall(glDeleteFramebuffers(1, &src_fbo));
+  texture_delete(full);
+
+  stbi_image_free(wp->data);
+  wp->data = NULL;
 
   // Adjust the atlas pointer
   atlas->curr_height += wp->h;
@@ -268,7 +278,7 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
 
 void atlases_delete(Atlases* atlases) {
   for (i32 i = 0; i < atlases->len; i++) {
-    texture_delete(atlases->items[i].texture);
+    fbo_delete(&atlases->items[i].fbo);
   }
   mem_free(atlases->items);
 }
@@ -468,13 +478,13 @@ int main() {
 
         case W_READY: {
           Atlas* at = &app.atlases.items[wp->atlas_idx];
-          texture_bind(at->texture);
+          texture_bind(at->fbo.color_texture);
           imr_push_quad_tex_rounded(
             &app.imr,
             (v3) { wp->x, wp->y, 0 },
             (v2) { wp->w, wp->h },
             wp->uv,
-            at->texture.id,
+            at->fbo.color_texture.id,
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
             20.0f
