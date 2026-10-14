@@ -21,13 +21,16 @@ int main(int argc, char** argv) {
     "GLU",
     "m",
     "pthread",
-    "jpeg"
+    "jpeg",
+    "spng",
+    "z"
   );
   cbuild_srcs(
     &build,
     "src/external/glew/src/glew.c",
     "src/external/glfw/src/glfw.c",
     "src/base.c",
+    "src/img.c",
     "src/main.c"
   );
 
