@@ -30,7 +30,7 @@
 #define panic(x, ...) \
   do {\
     if (!(x)) {\
-      fprintf(stderr, "\033[31m[ASSERTION]: %s:%d:\033[0m ", __FILE__, __LINE__);\
+      fprintf(stderr, "\033[31m%s:%d: [ASSERTION]:\033[0m ", __FILE__, __LINE__);\
       fprintf(stderr, " " __VA_ARGS__);\
       fprintf(stderr, "\n");\
       exit(1);\
@@ -43,11 +43,11 @@
 #define LOG_WARN   93
 #define LOG_INFO   95
 
-#define log_typed(type, ...)         \
-  ({                                 \
-    printf("\033[%dm", type);        \
-    printf(__VA_ARGS__);             \
-    printf("\033[%dm", LOG_NORMAL);  \
+#define log_typed(type, ...)                             \
+  ({                                                     \
+    printf("\033[%dm%s:%d: ", type, __FILE__, __LINE__); \
+    printf(__VA_ARGS__);                                 \
+    printf("\033[%dm", LOG_NORMAL);                      \
   })
 
 #define log(...)                          \
@@ -406,6 +406,8 @@ typedef enum {
   MOUSE_BUTTON_DOWN,
   MOUSE_BUTTON_UP,
   MOUSE_MOTION,
+  MOUSE_WHEEL_DOWN,
+  MOUSE_WHEEL_UP,
 
   WINDOW_RESIZE,
 } EventType;
@@ -423,6 +425,7 @@ typedef struct {
     MouseButton button;
     v2 mouse_pos;
     v2 window_size;
+    v2 wheel_offset;
   } e;
 } Event;
 
@@ -446,8 +449,8 @@ typedef struct {
 } OCamera_Boundary;
 
 typedef struct {
-  v2 pos;   // In GL Coords
-  v2 render_pos;      // snapped, used to render the game world
+  v2 pos;              // In Pixel Coords
+  v2 render_pos;       // snapped, used to render the game world
   v2 pixel_offset;     // the rounding remainder, used only at display time
 
   f32 zoom;
@@ -1503,7 +1506,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
       event.e.button = MOUSE_BUTTON_RIGHT;
       break;
     default:
-      panic(0, "Unhandled mouse button: %d\n", button);
+      log_warn("Unhandled mouse button: %d\n", button);
   }
 
   switch (action) {
@@ -1514,7 +1517,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
       event.type = MOUSE_BUTTON_UP;
       break;
     default:
-      panic(0, "Unhandled mouse action: %d\n", action);
+      log_warn("Unhandled mouse action: %d\n", action);
   }
 
   event_enqueue(&ctx->e_queue, event);
@@ -1534,11 +1537,28 @@ void window_resize_callback(GLFWwindow* window, i32 width, i32 height) {
   event_enqueue(&ctx->e_queue, event);
 }
 
+void scroll_callback(GLFWwindow* window, f64 xoffset, f64 yoffset) {
+  Event event = { 0 };
+
+  if (yoffset == 1.0) {
+    event.type = MOUSE_WHEEL_UP;
+    event_enqueue(&ctx->e_queue, event);
+  }
+  else if (yoffset == -1.0) {
+    event.type = MOUSE_WHEEL_DOWN;
+    event_enqueue(&ctx->e_queue, event);
+  }
+  else {
+    log_warn("Unhandled offset of mouse: %f\n", yoffset);
+  }
+}
+
 b8 event_poll(Window window, Event* event) {
   glfwSetKeyCallback(window.glfw_window, key_callback);
   glfwSetMouseButtonCallback(window.glfw_window, mouse_button_callback);
   glfwSetCursorPosCallback(window.glfw_window, cursor_position_callback);
   glfwSetWindowSizeCallback(window.glfw_window, window_resize_callback);
+  glfwSetScrollCallback(window.glfw_window, scroll_callback);
 
   if (ctx->e_queue.front != ctx->e_queue.back) {
     *event = event_dequeue(&ctx->e_queue);  // Dequeue the next event

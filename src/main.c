@@ -5,8 +5,13 @@
 #include "base.h"
 #include "img.h"
 
-#define THUMB_W 150
+#define THUMB_W 120
+#define THUMB_R 10.0f
 #define ATLAS_SIZE (v2) { THUMB_W, 10000 }
+#define SCROLL_SPEED 30
+#define MARGIN 10.0f
+#define MIN_GAP 5.0f
+#define HIGHLIGHT_THICKNESS 2.0f
 
 //===========================
 // DEFINITIONS BEGINS HERE!
@@ -108,6 +113,7 @@ void app_new(App* app);
 void app_delete(App* app);
 void app_spawn_workers(App* app, i32 workers);
 void app_create_layout(App* app);
+void app_clamp_camera(App* app);
 
 //=============================
 // IMPLEMENTATION BEGINS HERE!
@@ -388,17 +394,13 @@ void app_spawn_workers(App* app, i32 workers) {
 }
 
 void app_create_layout(App* app) {
-  // Layout settings
-  f32 margin = 50.0f;
-  f32 min_gap = 10.0f;
-
   f32 window_width = (f32)app->window.width;
 
   // Calculate usable width
-  f32 available_width = window_width - 2.0f * margin;
+  f32 available_width = window_width - 2.0f * MARGIN;
 
   // Calculate how many thumbnails fit
-  i32 per_row = (i32)((available_width + min_gap) / (THUMB_W + min_gap));
+  i32 per_row = (i32)((available_width + MIN_GAP) / (THUMB_W + MIN_GAP));
 
   if (per_row < 1)
     per_row = 1;
@@ -413,39 +415,71 @@ void app_create_layout(App* app) {
   }
 
   // Starting position
-  f32 x = margin;
-  f32 y = margin;
+  f32 x = MARGIN;
+  f32 y = MARGIN;
 
-  i32 row_count = 0;
+  i32 row_start = 0;
 
-  // Tallest thumbnail in the current row
-  i32 max_h = 0;
+  while (row_start < app->wallpapers.len) {
+    // Find the end of the current row
+    i32 row_end = row_start;
+    i32 max_h = 0;
+
+    while (row_end < app->wallpapers.len &&
+           row_end - row_start < per_row) {
+
+      Wallpaper* wp = &app->wallpapers.items[row_end];
+
+      // Find the tallest wallpaper
+      if (wp->h > max_h)
+        max_h = wp->h;
+
+      row_end++;
+    }
+
+    // Position wallpapers in the row
+    x = MARGIN;
+
+    for (i32 i = row_start; i < row_end; i++) {
+      Wallpaper* wp = &app->wallpapers.items[i];
+
+      // Center vertically in the row
+      wp->x = x;
+      wp->y = y + (max_h - wp->h) / 2.0f;
+
+      x += THUMB_W + gap;
+    }
+
+    // Move to the next row
+    y += max_h + MIN_GAP;
+    row_start = row_end;
+  }
+}
+
+void app_clamp_camera(App* app) {
+  f32 content_bottom = 0.0f;
 
   for (i32 i = 0; i < app->wallpapers.len; i++) {
     Wallpaper* wp = &app->wallpapers.items[i];
 
-    // Set thumbnail position
-    wp->x = x;
-    wp->y = y;
-
-    // Track tallest thumbnail
-    if (wp->h > max_h)
-      max_h = wp->h;
-
-    row_count++;
-
-    // Start a new row when current row is full
-    if (row_count >= per_row) {
-      y += max_h + min_gap;
-
-      x = margin;
-      max_h = 0;
-      row_count = 0;
-    } else {
-      // Move to next thumbnail
-      x += THUMB_W + gap;
-    }
+    f32 bottom = wp->y + wp->h;
+    if (bottom > content_bottom)
+      content_bottom = bottom;
   }
+
+  f32 view_height = (f32)app->window.height;
+
+  // Keep a margin below the last thumbnail
+  f32 max_y = content_bottom + MARGIN - view_height;
+
+  if (max_y < 0.0f)
+    max_y = 0.0f;
+
+  if (app->camera.pos.y < 0.0f)
+    app->camera.pos.y = 0.0f;
+
+  if (app->camera.pos.y > max_y)
+    app->camera.pos.y = max_y;
 }
 
 // :main
@@ -464,9 +498,19 @@ int main() {
           // Adjust the camaera boundaries during resize
           app.camera.boundary.right = event.e.window_size.x;
           app.camera.boundary.bottom = event.e.window_size.y;
-        break;
+          break;
+
+        case MOUSE_WHEEL_DOWN:
+          ocamera_change_pos(&app.camera, (v2) { 0, SCROLL_SPEED });
+          break;
+        case MOUSE_WHEEL_UP:
+          ocamera_change_pos(&app.camera, (v2) { 0, -SCROLL_SPEED });
+          break;
       }
     }
+
+    app_create_layout(&app);
+    app_clamp_camera(&app);
 
     // Rendering
     imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
@@ -474,8 +518,6 @@ int main() {
 
     m4 mvp = ocamera_calc_mvp(&app.camera);
     imr_update_mvp(&app.imr, mvp);
-
-    app_create_layout(&app);
 
     imr_begin(&app.imr);
 
@@ -490,7 +532,7 @@ int main() {
             (v2) { wp->w, wp->h },
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
-            20.0f
+            THUMB_R
           );
           break;
 
@@ -503,6 +545,22 @@ int main() {
         };
 
         case W_READY: {
+          Rect r = { wp->x, wp->y, wp->w, wp->h };
+          v2 mp = event_mouse_pos(app.window);
+          mp.x += app.camera.pos.x;
+          mp.y += app.camera.pos.y;
+
+          if (point_in_rect(mp, r)) {
+            imr_push_quad_rounded(
+              &app.imr,
+              (v3) { wp->x - HIGHLIGHT_THICKNESS, wp->y - HIGHLIGHT_THICKNESS, 0 },
+              (v2) { wp->w + HIGHLIGHT_THICKNESS * 2, wp->h + HIGHLIGHT_THICKNESS * 2 },
+              m4_identity(),
+              (v4) { 1, 1, 0, 1 },
+              THUMB_R
+            );
+          }
+
           Atlas* at = &app.atlases.items[wp->atlas_idx];
           texture_bind(at->fbo.color_texture);
           imr_push_quad_tex_rounded(
@@ -513,7 +571,7 @@ int main() {
             at->fbo.color_texture.id,
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
-            20.0f
+            THUMB_R
           );
         } break;
 
