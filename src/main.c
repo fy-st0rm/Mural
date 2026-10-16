@@ -85,13 +85,12 @@ b8 wallpaper_apply(Wallpaper* wp);
 
 // :wallpapers def
 typedef struct {
-  Wallpaper* items;    // This owns the Wallpaper memory
+  Wallpaper* items;
   i32 len;
   i32 capacity;
   i32 top;
 } Wallpapers;
 
-// This will only load up the name of the wallpaper instead of the actual textures
 void wallpapers_new(Wallpapers* wps, Config* cfg);
 void wallpapers_delete(Wallpapers* wps);
 Wallpaper* wallpapers_dequeue(Wallpapers* wps);
@@ -117,7 +116,6 @@ void atlases_delete(Atlases* atlases);
 typedef struct {
   i32 worker_id;
   Wallpapers* wps;
-  i32 start, end;
   pthread_mutex_t* wallpapers_mutex;
 } ThreadArgs;
 
@@ -134,11 +132,15 @@ typedef struct {
 
   pthread_mutex_t wallpapers_mutex;
   Wallpapers wallpapers;
+
+  pthread_t* workers;
+  i32 worker_count;
 } App;
 
 void app_new(App* app);
 void app_delete(App* app);
 void app_spawn_workers(App* app, i32 workers);
+void app_wait_workers(App* app);
 void app_create_layout(App* app);
 void app_clamp_camera(App* app);
 void app_select_wallpaper(App* app, Wallpaper* wp);
@@ -184,7 +186,41 @@ static void config_write_string(FILE* file, const char* str) {
   fputc('"', file);
 }
 
+static void config_defaults(Config* cfg) {
+  *cfg = (Config) {
+    .general = {
+      .scroll_speed = 30.0f,
+      .font_file = strdup("./font.otf"),
+      .font_size = 20.0f,
+    },
+
+    .layout = {
+      .thumbnail_width = 120.0f,
+      .thumbnail_radius = 10.0f,
+      .margin = 10.0f,
+      .inner_gap = 7.0f,
+      .border_thickness = 2.0f,
+    },
+
+    .color = {
+      .background = 0x2f3e46ff,
+      .border_select = 0x457b9dff,
+      .border_unselect = 0xcad2c5ff,
+      .font_color = 0xcad2c5ff,
+    },
+
+    .atlas_size = { 120.0f, 10000.0f },
+  };
+}
+
 b8 config_new(Config* cfg, const char* path) {
+  config_defaults(cfg);
+
+  if (access(path, F_OK) != 0) {
+    config_save(cfg, path);
+    return true;
+  }
+
   toml_result_t result = toml_parse_file_ex(path);
 
   if (!result.ok) {
@@ -200,8 +236,10 @@ b8 config_new(Config* cfg, const char* path) {
   if (scroll_speed.type == TOML_FP64)
     cfg->general.scroll_speed = (f32)scroll_speed.u.fp64;
 
-  if (font_file.type == TOML_STRING)
+  if (font_file.type == TOML_STRING) {
+    free((void*)cfg->general.font_file);
     cfg->general.font_file = strdup(font_file.u.s);
+  }
 
   if (font_size.type == TOML_FP64)
     cfg->general.font_size = (f32)font_size.u.fp64;
@@ -264,7 +302,6 @@ b8 config_new(Config* cfg, const char* path) {
   if (selected.type == TOML_STRING)
     cfg->selected_wallpaper = strdup(selected.u.s);
 
-  // Atlas Size
   cfg->atlas_size = (v2) {
     cfg->layout.thumbnail_width,
     10000
@@ -275,7 +312,10 @@ b8 config_new(Config* cfg, const char* path) {
 }
 
 void config_save(Config* cfg, const char* path) {
-  FILE* file = fopen(path, "w");
+  char temp_path[PATH_MAX];
+  snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+
+  FILE* file = fopen(temp_path, "w");
 
   if (!file) {
     log_error("Failed to save config: %s\n", path);
@@ -340,7 +380,16 @@ void config_save(Config* cfg, const char* path) {
     fputc('\n', file);
   }
 
-  fclose(file);
+  if (fclose(file) != 0) {
+    log_error("Failed to save config: %s\n", path);
+    remove(temp_path);
+    return;
+  }
+
+  if (rename(temp_path, path) != 0) {
+    log_error("Failed to replace config: %s\n", path);
+    remove(temp_path);
+  }
 }
 
 void config_delete(Config* cfg) {
@@ -348,9 +397,11 @@ void config_delete(Config* cfg) {
     free((void*)cfg->paths.items[i]);
 
   mem_free(cfg->paths.items);
+  free((void*)cfg->general.font_file);
   free(cfg->selected_wallpaper);
 
   cfg->paths = (WallpaperPaths) {0};
+  cfg->general.font_file = NULL;
   cfg->selected_wallpaper = NULL;
 }
 
@@ -358,12 +409,16 @@ void config_delete(Config* cfg) {
 b8 wallpaper_read_from_file(Wallpaper* wp) {
   panic(wp, "Parameter wp cannot be NULL");
 
-  // Loading the full image, the GPU scales it into the atlas later
   i32 w, h, c;
 
+  // Load a smaller image for the thumbnail
   u8* full_data = jpeg_load_scaled(wp->path, config.layout.thumbnail_width * 2, &w, &h);
-  if (!full_data) full_data = png_load_spng(wp->path, &w, &h);
-  if (!full_data) full_data = stbi_load(wp->path, &w, &h, &c, 4);
+
+  if (!full_data)
+    full_data = png_load_spng(wp->path, &w, &h);
+
+  if (!full_data)
+    full_data = stbi_load(wp->path, &w, &h, &c, 4);
 
   if (!full_data) {
     log_error("Failed to load file: %s\n", wp->path);
@@ -371,7 +426,6 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
     return false;
   }
 
-  // Saving the data
   wp->data = full_data;
   wp->full_w = w;
   wp->full_h = h;
@@ -390,8 +444,12 @@ b8 wallpaper_apply(Wallpaper* wp) {
   if (!wp || !wp->path)
     return false;
 
-  pid_t pid;
+  if (access(wp->path, R_OK) != 0) {
+    log_error("Wallpaper does not exist: %s\n", wp->path);
+    return false;
+  }
 
+  pid_t pid;
   char* const args[] = { "feh", "--bg-fill", wp->path, NULL };
   int result = posix_spawnp(&pid, "feh", NULL, NULL, args, environ);
 
@@ -430,20 +488,18 @@ void wallpapers_new(Wallpapers* wps, Config* cfg) {
     struct dirent* entry;
 
     while ((entry = readdir(dir)) != NULL) {
-
-      // Skip . & ..
       if (entry->d_name[0] == '.')
         continue;
 
       char file_path[PATH_MAX];
-
       snprintf(file_path, sizeof(file_path), "%s/%s", path, entry->d_name);
+
       Wallpaper wp = {
         .path = strdup(file_path),
         .state = W_PENDING
       };
 
-      // Query the files width and height of image files
+      // Query image dimensions without loading the image
       i32 fw, fh, fc;
 
       if (!stbi_info(file_path, &fw, &fh, &fc)) {
@@ -451,13 +507,13 @@ void wallpapers_new(Wallpapers* wps, Config* cfg) {
         continue;
       }
 
-      // Making it smaller size
       wp.w = config.layout.thumbnail_width;
       wp.h = (i32)((f32)fh * config.layout.thumbnail_width / fw);
-      if (wp.h < 1) wp.h = 1;
+
+      if (wp.h < 1)
+        wp.h = 1;
 
       da_append(wps, wp);
-
       log_info("Found: %s\n", file_path);
     }
 
@@ -488,10 +544,7 @@ void atlases_add_new(Atlases* atlases, v2 size) {
     .curr_height = 0,
   };
 
-  panic(
-    fbo_new(&atlas.fbo, atlas.width, atlas.height),
-    "Failed to create the first atlas"
-  );
+  panic(fbo_new(&atlas.fbo, atlas.width, atlas.height), "Failed to create atlas");
 
   da_append(atlases, atlas);
 }
@@ -507,21 +560,19 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
 
   i32 y0 = atlas->curr_height;
 
-  // Upload the full-size image into a scratch texture
+  // Upload the image into a temporary texture
   Texture full;
 
-  if (!texture_from_data(&full, wp->full_w, wp->full_h, wp->data, TEX_RGBA)) {
+  if (!texture_from_data(&full, wp->full_w, wp->full_h, wp->data, TEX_RGBA))
     return false;
-  }
 
-  // Blit it scaled into the atlas, the GPU does the resize
   u32 src_fbo;
 
   GLCall(glGenFramebuffers(1, &src_fbo));
-
   GLCall(glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo));
   GLCall(glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, full.id, 0));
   GLCall(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, atlas->fbo.id));
+
   GLCall(glBlitFramebuffer(
     0, 0, wp->full_w, wp->full_h,
     0, y0, wp->w, y0 + wp->h,
@@ -536,11 +587,9 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
   free(wp->data);
   wp->data = NULL;
 
-  // Adjust the atlas pointer
   atlas->curr_height += wp->h;
 
   wp->atlas_idx = atlases->len - 1;
-
   wp->uv = (Rect) {
     0.0f,
     (f32)y0 / (f32)atlas->height,
@@ -564,29 +613,26 @@ void atlases_delete(Atlases* atlases) {
 void* worker_load_wallpapers_into_memory(void* _args) {
   ThreadArgs* args = (ThreadArgs*)_args;
 
-  Wallpapers* wps = args->wps;
-  pthread_mutex_t* wallpapers_mutex = args->wallpapers_mutex;
-
   while (true) {
-    pthread_mutex_lock(wallpapers_mutex);
-    Wallpaper* wp = wallpapers_dequeue(wps);
-    pthread_mutex_unlock(wallpapers_mutex);
+    pthread_mutex_lock(args->wallpapers_mutex);
+    Wallpaper* wp = wallpapers_dequeue(args->wps);
+    pthread_mutex_unlock(args->wallpapers_mutex);
 
     if (!wp)
       break;
 
-    if (wp->state == W_PENDING) {
-      if (!wallpaper_read_from_file(wp)) {
-        log_warn("Skipping: %s\n", wp->path);
-        continue;
-      }
+    if (wp->state != W_PENDING)
+      continue;
 
-      log_info("Loaded: %s\n", wp->path);
+    if (!wallpaper_read_from_file(wp)) {
+      log_warn("Skipping: %s\n", wp->path);
+      continue;
     }
+
+    log_info("Loaded: %s\n", wp->path);
   }
 
   log_sucess("Worker Done: %d\n", args->worker_id);
-
   free(args);
 
   return NULL;
@@ -607,57 +653,47 @@ void app_new(App* app) {
   ), "Failed to create window\n");
 
   app->camera = ocamera_new(
-    (v2) {0, 0},
+    (v2) { 0, 0 },
     1,
     (OCamera_Boundary) {
-      .left   = 0,
-      .right  = app->window.width,
-      .top    = 0,
+      .left = 0,
+      .right = app->window.width,
+      .top = 0,
       .bottom = app->window.height,
-      .near   = -1.0f,
-      .far    = 1000.0f,
+      .near = -1.0f,
+      .far = 1000.0f,
     }
   );
 
-  panic(
-    imr_new(&app->imr),
-    "Failed to initialize renderer"
-  );
+  panic(imr_new(&app->imr), "Failed to initialize renderer");
 
-  // Loading font
+  // Load font
   app->font = (Font) {0};
-  panic(
-      font_new(&app->font, config.general.font_file, config.general.font_size),
-      "Failed to load font"
-  );
+  panic(font_new(&app->font, config.general.font_file, config.general.font_size), "Failed to load font");
 
   // Create the first atlas
   app->atlases = (Atlases) {0};
   atlases_add_new(&app->atlases, config.atlas_size);
 
-  // Setup the wallpapers and mutex
+  // Setup wallpapers and mutex
   app->wallpapers_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
   app->wallpapers = (Wallpapers) {0};
-
-  wallpapers_new(
-    &app->wallpapers,
-    &config
-  );
+  wallpapers_new(&app->wallpapers, &config);
 }
 
 void app_delete(App* app) {
-  log_info(
-    "Atlases used: %d\n",
-    app->atlases.len
-  );
+  app_wait_workers(app);
+
+  log_info("Atlases used: %d\n", app->atlases.len);
 
   atlases_delete(&app->atlases);
   wallpapers_delete(&app->wallpapers);
-
   config_delete(&config);
 
   imr_delete(&app->imr);
   window_delete(app->window);
+
+  pthread_mutex_destroy(&app->wallpapers_mutex);
 }
 
 void app_spawn_workers(App* app, i32 workers) {
@@ -670,53 +706,38 @@ void app_spawn_workers(App* app, i32 workers) {
   if (workers > app->wallpapers.len)
     workers = app->wallpapers.len;
 
-  i32 per_worker = app->wallpapers.len / workers;
-  i32 remainder = app->wallpapers.len % workers;
-
-  i32 start = 0;
+  app->workers = mem_alloc(sizeof(pthread_t) * workers);
+  app->worker_count = workers;
 
   for (i32 i = 0; i < workers; i++) {
-    i32 chunk =
-      per_worker + (i < remainder ? 1 : 0);
-
-    i32 end = start + chunk;
-
     ThreadArgs* args = mem_alloc(sizeof(ThreadArgs));
 
     args->worker_id = i + 1;
     args->wps = &app->wallpapers;
     args->wallpapers_mutex = &app->wallpapers_mutex;
-    args->start = start;
-    args->end = end;
 
-    pthread_t thread;
-
-    pthread_create(
-      &thread,
-      NULL,
-      worker_load_wallpapers_into_memory,
-      args
-    );
-
-    // We intentionally don't wait here.
-    // Workers load images while the renderer continues.
-    start = end;
+    pthread_create(&app->workers[i], NULL, worker_load_wallpapers_into_memory, args);
   }
+}
+
+void app_wait_workers(App* app) {
+  for (i32 i = 0; i < app->worker_count; i++)
+    pthread_join(app->workers[i], NULL);
+
+  free(app->workers);
+
+  app->workers = NULL;
+  app->worker_count = 0;
 }
 
 void app_create_layout(App* app) {
   f32 window_width = (f32)app->window.width;
 
   // Calculate usable width
-  f32 available_width =
-    window_width - 2.0f * config.layout.margin;
+  f32 available_width = window_width - 2.0f * config.layout.margin;
 
   // Calculate how many thumbnails fit
-  i32 per_row =
-    (i32)(
-      (available_width + config.layout.inner_gap) /
-      (config.layout.thumbnail_width + config.layout.inner_gap)
-    );
+  i32 per_row = (i32)((available_width + config.layout.inner_gap) / (config.layout.thumbnail_width + config.layout.inner_gap));
 
   if (per_row < 1)
     per_row = 1;
@@ -727,10 +748,7 @@ void app_create_layout(App* app) {
   if (per_row == 1) {
     gap = 0.0f;
   } else {
-    gap =
-      (available_width -
-       per_row * config.layout.thumbnail_width) /
-      (per_row - 1);
+    gap = (available_width - per_row * config.layout.thumbnail_width) / (per_row - 1);
   }
 
   // Starting position
@@ -740,17 +758,12 @@ void app_create_layout(App* app) {
   i32 row_start = 0;
 
   while (row_start < app->wallpapers.len) {
-
     // Find the end of the current row
     i32 row_end = row_start;
     i32 max_h = 0;
 
-    while (
-      row_end < app->wallpapers.len &&
-      row_end - row_start < per_row
-    ) {
-      Wallpaper* wp =
-        &app->wallpapers.items[row_end];
+    while (row_end < app->wallpapers.len && row_end - row_start < per_row) {
+      Wallpaper* wp = &app->wallpapers.items[row_end];
 
       // Find the tallest wallpaper
       if (wp->h > max_h)
@@ -763,13 +776,11 @@ void app_create_layout(App* app) {
     x = config.layout.margin;
 
     for (i32 i = row_start; i < row_end; i++) {
-      Wallpaper* wp =
-        &app->wallpapers.items[i];
+      Wallpaper* wp = &app->wallpapers.items[i];
 
       // Center vertically in the row
       wp->x = x;
-      wp->y =
-        y + (max_h - wp->h) / 2.0f;
+      wp->y = y + (max_h - wp->h) / 2.0f;
 
       x += config.layout.thumbnail_width + gap;
     }
@@ -781,12 +792,15 @@ void app_create_layout(App* app) {
 }
 
 void app_clamp_camera(App* app) {
+  if (app->wallpapers.len == 0) {
+    app->camera.pos.y = 0;
+    return;
+  }
+
   f32 content_bottom = 0.0f;
 
   for (i32 i = 0; i < app->wallpapers.len; i++) {
-    Wallpaper* wp =
-      &app->wallpapers.items[i];
-
+    Wallpaper* wp = &app->wallpapers.items[i];
     f32 bottom = wp->y + wp->h;
 
     if (bottom > content_bottom)
@@ -797,6 +811,7 @@ void app_clamp_camera(App* app) {
 
   // Keep a margin below the last thumbnail
   f32 max_y = content_bottom + config.layout.margin - view_height;
+
   if (max_y < 0.0f)
     max_y = 0.0f;
 
@@ -812,9 +827,10 @@ void app_select_wallpaper(App* app, Wallpaper* wp) {
     return;
 
   free(config.selected_wallpaper);
-
   config.selected_wallpaper = strdup(wp->path);
+
   config_save(&config, "./mural.toml");
+
   log_info("Selected wallpaper: %s\n", wp->path);
 }
 
@@ -831,10 +847,7 @@ int main(int argc, char** argv) {
   // Restore the previously selected wallpaper
   if (argc > 1 && strcmp(argv[1], "--restore") == 0) {
     if (!config.selected_wallpaper) {
-      log_error(
-        "No selected wallpaper in config\n"
-      );
-
+      log_error("No selected wallpaper in config\n");
       config_delete(&config);
       return 1;
     }
@@ -844,6 +857,7 @@ int main(int argc, char** argv) {
     };
 
     b8 success = wallpaper_apply(&wp);
+
     config_delete(&config);
     return success ? 0 : 1;
   }
@@ -854,13 +868,32 @@ int main(int argc, char** argv) {
   app_spawn_workers(&app, 5);
 
   while (!app.window.should_close) {
+    // Upload one image per frame
+    Wallpaper* loaded = NULL;
+
+    pthread_mutex_lock(&app.wallpapers_mutex);
+
+    for (i32 i = 0; i < app.wallpapers.len; i++) {
+      if (app.wallpapers.items[i].state == W_LOADED) {
+        loaded = &app.wallpapers.items[i];
+        break;
+      }
+    }
+
+    pthread_mutex_unlock(&app.wallpapers_mutex);
+
+    if (loaded) {
+      if (!atlases_add_wallpaper(&app.atlases, loaded))
+        loaded->state = W_FAILED;
+      else
+        log_info("TEXTURED: %s\n", basename(loaded->path));
+    }
 
     // Event loop
     Event event = {0};
 
     while (event_poll(app.window, &event)) {
       switch (event.type) {
-
         case WINDOW_RESIZE:
           // Keep the camera boundary in sync
           app.camera.boundary.right = event.e.window_size.x;
@@ -881,13 +914,11 @@ int main(int argc, char** argv) {
 
           // Convert mouse position to world position
           v2 mp = event_mouse_pos(app.window);
-
           mp.x += app.camera.pos.x;
           mp.y += app.camera.pos.y;
 
           for (i32 i = 0; i < app.wallpapers.len; i++) {
             Wallpaper* wp = &app.wallpapers.items[i];
-
             Rect r = { wp->x, wp->y, wp->w, wp->h };
 
             if (point_in_rect(mp, r)) {
@@ -914,12 +945,19 @@ int main(int argc, char** argv) {
 
     imr_begin(&app.imr);
 
+    v2 mouse = event_mouse_pos(app.window);
+    mouse.x += app.camera.pos.x;
+    mouse.y += app.camera.pos.y;
+
     if (app.wallpapers.len) {
       for (i32 i = 0; i < app.wallpapers.len; i++) {
         Wallpaper* wp = &app.wallpapers.items[i];
 
-        switch (wp->state) {
+        pthread_mutex_lock(&app.wallpapers_mutex);
+        WallpaperState state = wp->state;
+        pthread_mutex_unlock(&app.wallpapers_mutex);
 
+        switch (state) {
           case W_PENDING:
             imr_push_quad_rounded(
               &app.imr,
@@ -931,24 +969,22 @@ int main(int argc, char** argv) {
             );
             break;
 
-          case W_LOADED: {
-            if (!atlases_add_wallpaper(&app.atlases, wp)) {
-              log_error("Failed to create texture for: %s\n", basename(wp->path));
-              continue;
-            }
-
-            log_info("TEXTURED: %s\n", basename(wp->path));
-          } break;
+          case W_LOADED:
+            // Waiting for the main thread to upload it
+            imr_push_quad_rounded(
+              &app.imr,
+              (v3) { wp->x, wp->y, 0 },
+              (v2) { wp->w, wp->h },
+              m4_identity(),
+              (v4) { 1, 1, 1, 1 },
+              config.layout.thumbnail_radius
+            );
+            break;
 
           case W_READY: {
             Rect r = { wp->x, wp->y, wp->w, wp->h };
-            v2 mp = event_mouse_pos(app.window);
 
-            // Convert mouse position to world position
-            mp.x += app.camera.pos.x;
-            mp.y += app.camera.pos.y;
-
-            if (point_in_rect(mp, r)) {
+            if (point_in_rect(mouse, r)) {
               imr_push_quad_rounded(
                 &app.imr,
                 (v3) { wp->x - config.layout.border_thickness, wp->y - config.layout.border_thickness, 0 },
@@ -998,8 +1034,11 @@ int main(int argc, char** argv) {
     } else {
       const char* text = "Mural";
       v2 size = font_calc_size(&app.font, text);
+
       font_render(
-        &app.imr, &app.font, text,
+        &app.imr,
+        &app.font,
+        text,
         (v3) { app.window.width / 2.0f - size.x / 2.0f, app.window.height / 2.0f + size.y / 2.0f },
         hex_to_rgba(config.color.font_color)
       );

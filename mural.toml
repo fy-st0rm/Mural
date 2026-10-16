@@ -11,13 +11,13 @@ inner_gap        = 7.0
 border_thickness = 2.0
 
 [color]
-background      = 0x2f3e46ff
-border_select   = 0x457b9dff
-border_unselect = 0xcad2c5ff
-font_color = 0xffffffff
+background      = 0x12171aff
+border_select   = 0x7dd3fcff
+border_unselect = 0x334155ff
+font_color      = 0xe2e8f0ff
 
 [wallpapers]
 paths = [
   "/home/st0rm/nest/sos/Wallpapers"
 ]
-selected_wallpaper = "/home/st0rm/nest/sos/Wallpapers/pixel_deer_forest.jpg"
+selected_wallpaper = "/home/st0rm/nest/sos/Wallpapers/forest.jpg"
