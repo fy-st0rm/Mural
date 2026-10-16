@@ -590,6 +590,7 @@ typedef struct {
   void* inner;
 } Context;
 
+void ctx_begin();
 void ctx_end();
 
 // :frame def
@@ -645,8 +646,8 @@ void animator_switch(Animator* animator, i32 state);
 Frame animator_get_frame(Animator* animator);
 
 // :font def
-#define FONT_ATLAS_W 512
-#define FONT_ATLAS_H 512
+#define FONT_ATLAS_W 1000
+#define FONT_ATLAS_H 1000
 
 typedef struct {
   Rect uv;
