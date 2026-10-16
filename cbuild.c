@@ -13,7 +13,8 @@ int main(int argc, char** argv) {
     &build,
     "./src/",
     "./src/external/glew/include/",
-    "./src/external/glfw/include/"
+    "./src/external/glfw/include/",
+    "./src/external/tomlc17/"
   );
   cbuild_libs(
     &build,
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
     &build,
     "src/external/glew/src/glew.c",
     "src/external/glfw/src/glfw.c",
+    "src/external/tomlc17/tomlc17.c",
     "src/base.c",
     "src/img.c",
     "src/main.c"

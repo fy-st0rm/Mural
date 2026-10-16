@@ -187,16 +187,6 @@ typedef enum {
   DIR_COUNT,
 } Dir;
 
-// :utils def
-typedef struct {
-  char* data;
-  size_t size;
-} FileData;
-
-b8 read_file(FileData* fd, const char* path);   // Returned buffer is heap allocated. Make sure to free it after use.
-u64 hash_data(char* data);
-u64 zigzag(i32 x);
-
 // :alloc def
 #define TRACE_ALLOCATOR_MEMORY_CAP 1024
 #define TRACE_ALLOCATOR_GROW_RATE 0.5
@@ -678,6 +668,17 @@ void font_render(IMR* imr, Font* font, const char* text, v3 pos, v4 color);
 v2 font_calc_size(Font* font, const char* text);
 void font_delete(Font* font);
 
+// :utils def
+typedef struct {
+  char* data;
+  size_t size;
+} FileData;
+
+b8 read_file(FileData* fd, const char* path);   // Returned buffer is heap allocated. Make sure to free it after use.
+u64 hash_data(char* data);
+u64 zigzag(i32 x);
+v4 hex_to_rgba(u32 hex);
+
 
 // :def end
 
@@ -687,7 +688,6 @@ void font_delete(Font* font);
 //=============================
 
 
-// :impl
 #ifdef BASE_IMPLEMENTATION
 
 // :context impl
@@ -708,53 +708,6 @@ void ctx_begin() {
 void ctx_end() {
   if (ctx->t_alloc) trace_allocator_delete(ctx->t_alloc);
   free(ctx);
-}
-
-// :utils impl
-b8 read_file(FileData* fd, const char* path) {
-  panic(fd, "Paramter fd cannot be NULL");
-
-  FILE* file = fopen(path, "rb");
-  if (file == NULL) {
-    log_error("Failed to open file: %s", path);
-    return false;
-  }
-
-  // Get file size
-  fseek(file, 0, SEEK_END);
-  long size = ftell(file);
-  rewind(file);
-
-  // Allocate memory (+1 for '\0')
-  char* buffer = malloc(size + 1);
-  if (!buffer) {
-    fclose(file);
-    panic(false, "Failed to allocated buffer");
-  }
-
-  // Read file
-  fread(buffer, 1, size, file);
-  buffer[size] = '\0';
-
-  fclose(file);
-
-  // Storing the result
-  fd->data = buffer;
-  fd->size = size;
-  return true;
-}
-
-u64 hash_data(char* data) {
-  u64 hash = 5381;
-  i32 c;
-  while (c = *data++) {
-    hash = ((hash << 5) + hash) + c; // hash * 33 + c
-  }
-  return hash;
-}
-
-u64 zigzag(i32 x) {
-  return ((u64)x << 1) ^ ((u64)x >> 31);
 }
 
 // :alloc impl
@@ -2724,6 +2677,63 @@ v2 font_calc_size(Font* font, const char* text) {
 void font_delete(Font* font) {
   texture_delete(font->atlas);
 }
+
+// :utils impl
+b8 read_file(FileData* fd, const char* path) {
+  panic(fd, "Paramter fd cannot be NULL");
+
+  FILE* file = fopen(path, "rb");
+  if (file == NULL) {
+    log_error("Failed to open file: %s", path);
+    return false;
+  }
+
+  // Get file size
+  fseek(file, 0, SEEK_END);
+  long size = ftell(file);
+  rewind(file);
+
+  // Allocate memory (+1 for '\0')
+  char* buffer = malloc(size + 1);
+  if (!buffer) {
+    fclose(file);
+    panic(false, "Failed to allocated buffer");
+  }
+
+  // Read file
+  fread(buffer, 1, size, file);
+  buffer[size] = '\0';
+
+  fclose(file);
+
+  // Storing the result
+  fd->data = buffer;
+  fd->size = size;
+  return true;
+}
+
+u64 hash_data(char* data) {
+  u64 hash = 5381;
+  i32 c;
+  while (c = *data++) {
+    hash = ((hash << 5) + hash) + c; // hash * 33 + c
+  }
+  return hash;
+}
+
+u64 zigzag(i32 x) {
+  return ((u64)x << 1) ^ ((u64)x >> 31);
+}
+
+v4 hex_to_rgba(u32 hex) {
+  return (v4) {
+    ((hex >> 24) & 0xFF) / 255.0f,
+    ((hex >> 16) & 0xFF) / 255.0f,
+    ((hex >> 8)  & 0xFF) / 255.0f,
+    (hex & 0xFF) / 255.0f
+  };
+}
+
 
 // :impl end
 

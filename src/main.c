@@ -2,16 +2,11 @@
 #include <limits.h>
 #include <libgen.h>
 #include <pthread.h>
+#include <tomlc17.h>
 #include "base.h"
 #include "img.h"
 
-#define THUMB_W 120
-#define THUMB_R 10.0f
-#define ATLAS_SIZE (v2) { THUMB_W, 10000 }
-#define SCROLL_SPEED 30
-#define MARGIN 10.0f
-#define MIN_GAP 5.0f
-#define HIGHLIGHT_THICKNESS 2.0f
+// TODO: Add Support for .config folder to read config from
 
 //===========================
 // DEFINITIONS BEGINS HERE!
@@ -19,16 +14,38 @@
 
 // :config def
 typedef struct {
+  f32 scroll_speed;
+} GeneralConfig;
+
+typedef struct {
+  f32 thumbnail_width;
+  f32 thumbnail_radius;
+  f32 margin;
+  f32 inner_gap;
+  f32 border_thickness;
+} LayoutConfig;
+
+typedef struct {
+  u32 background;
+  u32 border_select;
+  u32 border_unselect;
+} ColorConfig;
+
+typedef struct {
   const char** items;
   i32 len;
   i32 capacity;
 } WallpaperPaths;
 
 typedef struct {
+  GeneralConfig general;
+  LayoutConfig layout;
+  ColorConfig color;
   WallpaperPaths paths;
+  v2 atlas_size;
 } Config;
 
-void config_new(Config* cfg);
+b8 config_new(Config* cfg, const char* path);
 void config_delete(Config* cfg);
 
 // :wallpaper def
@@ -120,8 +137,75 @@ void app_clamp_camera(App* app);
 //=============================
 
 // :config impl
-void config_new(Config* cfg) {
-  da_append(&cfg->paths, strdup("/home/st0rm/nest/sos/Wallpapers"));
+Config config = {0};
+
+b8 config_new(Config* cfg, const char* path) {
+  toml_result_t result = toml_parse_file_ex(path);
+
+  if (!result.ok) {
+    log_error("Failed to parse config: %s\n", result.errmsg);
+    return false;
+  }
+
+  // General
+  toml_datum_t scroll_speed = toml_seek(result.toptab, "general.scroll_speed");
+
+  if (scroll_speed.type == TOML_FP64)
+    cfg->general.scroll_speed = (f32)scroll_speed.u.fp64;
+
+  // Layout
+  toml_datum_t thumbnail_width = toml_seek(result.toptab, "layout.thumbnail_width");
+  toml_datum_t thumbnail_radius = toml_seek(result.toptab, "layout.thumbnail_radius");
+  toml_datum_t margin = toml_seek(result.toptab, "layout.margin");
+  toml_datum_t inner_gap = toml_seek(result.toptab, "layout.inner_gap");
+  toml_datum_t border_thickness = toml_seek(result.toptab, "layout.border_thickness");
+
+  if (thumbnail_width.type == TOML_FP64)
+    cfg->layout.thumbnail_width = (f32)thumbnail_width.u.fp64;
+
+  if (thumbnail_radius.type == TOML_FP64)
+    cfg->layout.thumbnail_radius = (f32)thumbnail_radius.u.fp64;
+
+  if (margin.type == TOML_FP64)
+    cfg->layout.margin = (f32)margin.u.fp64;
+
+  if (inner_gap.type == TOML_FP64)
+    cfg->layout.inner_gap = (f32)inner_gap.u.fp64;
+
+  if (border_thickness.type == TOML_FP64)
+    cfg->layout.border_thickness = (f32)border_thickness.u.fp64;
+
+  // Color
+  toml_datum_t background = toml_seek(result.toptab, "color.background");
+  toml_datum_t border_select = toml_seek(result.toptab, "color.border_select");
+  toml_datum_t border_unselect = toml_seek(result.toptab, "color.border_unselect");
+
+  if (background.type == TOML_INT64)
+    cfg->color.background = (u32)background.u.int64;
+
+  if (border_select.type == TOML_INT64)
+    cfg->color.border_select = (u32)border_select.u.int64;
+
+  if (border_unselect.type == TOML_INT64)
+    cfg->color.border_unselect = (u32)border_unselect.u.int64;
+
+  // Wallpapers
+  toml_datum_t paths = toml_seek(result.toptab, "wallpapers.paths");
+
+  if (paths.type == TOML_ARRAY) {
+    for (i32 i = 0; i < paths.u.arr.size; i++) {
+      toml_datum_t path = paths.u.arr.elem[i];
+
+      if (path.type == TOML_STRING)
+        da_append(&cfg->paths, strdup(path.u.s));
+    }
+  }
+
+  // Atlas Size
+  cfg->atlas_size = (v2) { cfg->layout.thumbnail_width, 10000 };
+
+  toml_free(result);
+  return true;
 }
 
 void config_delete(Config* cfg) {
@@ -134,7 +218,7 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
 
   // Loading the full image, the GPU scales it into the atlas later
   i32 w, h, c;
-  u8* full_data = jpeg_load_scaled(wp->path, THUMB_W * 2, &w, &h);
+  u8* full_data = jpeg_load_scaled(wp->path, config.layout.thumbnail_width * 2, &w, &h);
   if (!full_data) full_data = png_load_spng(wp->path, &w, &h);
   if (!full_data) full_data = stbi_load(wp->path, &w, &h, &c, 4);
   if (!full_data) {
@@ -189,8 +273,8 @@ void wallpapers_new(Wallpapers* wps, Config* cfg) {
       }
 
       // Making it smaller size
-      wp.w = THUMB_W;
-      wp.h = (i32)((f32) fh * THUMB_W / fw);
+      wp.w = config.layout.thumbnail_width;
+      wp.h = (i32)((f32) fh * config.layout.thumbnail_width / fw);
       if (wp.h < 1) wp.h = 1;
       da_append(wps, wp);
 
@@ -236,7 +320,7 @@ b8 atlases_add_wallpaper(Atlases* atlases, Wallpaper* wp) {
 
   // Create a new atlas when it runs out of space
   if (wp->h > atlas->height - atlas->curr_height) {
-    atlases_add_new(atlases, ATLAS_SIZE);
+    atlases_add_new(atlases, config.atlas_size);
     atlas = &atlases->items[atlases->len - 1];
   }
 
@@ -346,17 +430,16 @@ void app_new(App* app) {
   panic(imr_new(&app->imr), "Failed to initialize renderer");
 
   // Load the config
-  app->config = (Config) {0};
-  config_new(&app->config);
+  panic(config_new(&config, "./mural.toml"), "Failed to load config");
 
   // Create the first atlas
   app->atlases = (Atlases) {0};
-  atlases_add_new(&app->atlases, ATLAS_SIZE);
+  atlases_add_new(&app->atlases, config.atlas_size);
 
   // Setup the wallpapers and mutex
   app->wallpapers_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
   app->wallpapers = (Wallpapers) {0};
-  wallpapers_new(&app->wallpapers, &app->config);
+  wallpapers_new(&app->wallpapers, &config);
 }
 
 void app_delete(App* app) {
@@ -364,7 +447,7 @@ void app_delete(App* app) {
 
   atlases_delete(&app->atlases);
   wallpapers_delete(&app->wallpapers);
-  config_delete(&app->config);
+  config_delete(&config);
 
   imr_delete(&app->imr);
   window_delete(app->window);
@@ -397,10 +480,10 @@ void app_create_layout(App* app) {
   f32 window_width = (f32)app->window.width;
 
   // Calculate usable width
-  f32 available_width = window_width - 2.0f * MARGIN;
+  f32 available_width = window_width - 2.0f * config.layout.margin;
 
   // Calculate how many thumbnails fit
-  i32 per_row = (i32)((available_width + MIN_GAP) / (THUMB_W + MIN_GAP));
+  i32 per_row = (i32)((available_width + config.layout.inner_gap) / (config.layout.thumbnail_width + config.layout.inner_gap));
 
   if (per_row < 1)
     per_row = 1;
@@ -411,12 +494,12 @@ void app_create_layout(App* app) {
   if (per_row == 1) {
     gap = 0.0f;
   } else {
-    gap = (available_width - per_row * THUMB_W) / (per_row - 1);
+    gap = (available_width - per_row * config.layout.thumbnail_width) / (per_row - 1);
   }
 
   // Starting position
-  f32 x = MARGIN;
-  f32 y = MARGIN;
+  f32 x = config.layout.margin;
+  f32 y = config.layout.margin;
 
   i32 row_start = 0;
 
@@ -438,7 +521,7 @@ void app_create_layout(App* app) {
     }
 
     // Position wallpapers in the row
-    x = MARGIN;
+    x = config.layout.margin;
 
     for (i32 i = row_start; i < row_end; i++) {
       Wallpaper* wp = &app->wallpapers.items[i];
@@ -447,11 +530,11 @@ void app_create_layout(App* app) {
       wp->x = x;
       wp->y = y + (max_h - wp->h) / 2.0f;
 
-      x += THUMB_W + gap;
+      x += config.layout.thumbnail_width + gap;
     }
 
     // Move to the next row
-    y += max_h + MIN_GAP;
+    y += max_h + config.layout.inner_gap;
     row_start = row_end;
   }
 }
@@ -470,7 +553,7 @@ void app_clamp_camera(App* app) {
   f32 view_height = (f32)app->window.height;
 
   // Keep a margin below the last thumbnail
-  f32 max_y = content_bottom + MARGIN - view_height;
+  f32 max_y = content_bottom + config.layout.margin - view_height;
 
   if (max_y < 0.0f)
     max_y = 0.0f;
@@ -501,10 +584,10 @@ int main() {
           break;
 
         case MOUSE_WHEEL_DOWN:
-          ocamera_change_pos(&app.camera, (v2) { 0, SCROLL_SPEED });
+          ocamera_change_pos(&app.camera, (v2) { 0, config.general.scroll_speed });
           break;
         case MOUSE_WHEEL_UP:
-          ocamera_change_pos(&app.camera, (v2) { 0, -SCROLL_SPEED });
+          ocamera_change_pos(&app.camera, (v2) { 0, -config.general.scroll_speed });
           break;
       }
     }
@@ -513,7 +596,7 @@ int main() {
     app_clamp_camera(&app);
 
     // Rendering
-    imr_clear((v4) { 0.5, 0.5, 0.5, 1 });
+    imr_clear(hex_to_rgba(config.color.background));
     glViewport(0, 0, app.window.width, app.window.height);
 
     m4 mvp = ocamera_calc_mvp(&app.camera);
@@ -532,7 +615,7 @@ int main() {
             (v2) { wp->w, wp->h },
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
-            THUMB_R
+            config.layout.thumbnail_radius
           );
           break;
 
@@ -553,11 +636,20 @@ int main() {
           if (point_in_rect(mp, r)) {
             imr_push_quad_rounded(
               &app.imr,
-              (v3) { wp->x - HIGHLIGHT_THICKNESS, wp->y - HIGHLIGHT_THICKNESS, 0 },
-              (v2) { wp->w + HIGHLIGHT_THICKNESS * 2, wp->h + HIGHLIGHT_THICKNESS * 2 },
+              (v3) { wp->x - config.layout.border_thickness, wp->y - config.layout.border_thickness, 0 },
+              (v2) { wp->w + config.layout.border_thickness * 2, wp->h + config.layout.border_thickness * 2 },
               m4_identity(),
-              (v4) { 1, 1, 0, 1 },
-              THUMB_R
+              hex_to_rgba(config.color.border_select),
+              config.layout.thumbnail_radius
+            );
+          } else {
+            imr_push_quad_rounded(
+              &app.imr,
+              (v3) { wp->x - config.layout.border_thickness, wp->y - config.layout.border_thickness, 0 },
+              (v2) { wp->w + config.layout.border_thickness * 2, wp->h + config.layout.border_thickness * 2 },
+              m4_identity(),
+              hex_to_rgba(config.color.border_unselect),
+              config.layout.thumbnail_radius
             );
           }
 
@@ -571,7 +663,7 @@ int main() {
             at->fbo.color_texture.id,
             m4_identity(),
             (v4) { 1, 1, 1, 1 },
-            THUMB_R
+            config.layout.thumbnail_radius
           );
         } break;
 
