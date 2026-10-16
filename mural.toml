@@ -18,6 +18,6 @@ font_color      = 0xe2e8f0ff
 
 [wallpapers]
 paths = [
-  "/home/st0rm/nest/sos/Wallpapers"
+  "/home/user/Wallpapers"
 ]
-selected_wallpaper = "/home/st0rm/nest/sos/Wallpapers/forest.jpg"
+selected_wallpaper = ""

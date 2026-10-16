@@ -34,7 +34,7 @@ Mural uses `mural.toml`.
 [general]
 scroll_speed = 30.0
 font_file = "./font.otf"
-font_size = 20.0
+font_size = 120.0
 
 [layout]
 thumbnail_width  = 120.0
@@ -44,12 +44,18 @@ inner_gap        = 7.0
 border_thickness = 2.0
 
 [color]
-background      = 0x2f3e46ff
-border_select   = 0x457b9dff
-border_unselect = 0xcad2c5ff
-font_color      = 0xcad2c5ff
+background      = 0x12171aff
+border_select   = 0x7dd3fcff
+border_unselect = 0x334155ff
+font_color      = 0xe2e8f0ff
 
 [wallpapers]
 paths = [
   "/home/user/Wallpapers"
 ]
+selected_wallpaper = ""
+```
+
+## Screenshots
+![Screenshot](./ss/ss1.png)
+![Screenshot](./ss/ss2.png)
