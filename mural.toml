@@ -14,10 +14,10 @@ border_thickness = 2.0
 background      = 0x2f3e46ff
 border_select   = 0x457b9dff
 border_unselect = 0xcad2c5ff
-font_color      = 0xffffffff
+font_color = 0xffffffff
 
 [wallpapers]
 paths = [
-# "/home/st0rm/nest/sos/Wallpapers"
+  "/home/st0rm/nest/sos/Wallpapers"
 ]
-selected_wallpaper = "/home/st0rm/nest/sos/Wallpapers/nordic_tower.jpg"
+selected_wallpaper = "/home/st0rm/nest/sos/Wallpapers/pixel_deer_forest.jpg"

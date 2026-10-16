@@ -306,7 +306,7 @@ void config_save(Config* cfg, const char* path) {
     "background      = 0x%08x\n"
     "border_select   = 0x%08x\n"
     "border_unselect = 0x%08x\n"
-    "font_color = 0x%08x\n"
+    "font_color      = 0x%08x\n"
     "\n"
     "[wallpapers]\n"
     "paths = [\n",
@@ -681,8 +681,7 @@ void app_spawn_workers(App* app, i32 workers) {
 
     i32 end = start + chunk;
 
-    ThreadArgs* args =
-      mem_alloc(sizeof(ThreadArgs));
+    ThreadArgs* args = mem_alloc(sizeof(ThreadArgs));
 
     args->worker_id = i + 1;
     args->wps = &app->wallpapers;
