@@ -3,7 +3,9 @@
 #include <libgen.h>
 #include <pthread.h>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <errno.h>
 #include <unistd.h>
 #include <tomlc17.h>
 
@@ -50,11 +52,14 @@ typedef struct {
 
   char* selected_wallpaper;
 
+  char* config_dir;
+  char* config_path;
+
   v2 atlas_size;
 } Config;
 
-b8 config_new(Config* cfg, const char* path);
-void config_save(Config* cfg, const char* path);
+b8 config_new(Config* cfg);
+void config_save(Config* cfg);
 void config_delete(Config* cfg);
 
 // :wallpaper def
@@ -190,8 +195,8 @@ static void config_defaults(Config* cfg) {
   *cfg = (Config) {
     .general = {
       .scroll_speed = 30.0f,
-      .font_file = strdup("./font.otf"),
-      .font_size = 20.0f,
+      .font_file = strdup("font.otf"),
+      .font_size = 120.0f,
     },
 
     .layout = {
@@ -203,28 +208,148 @@ static void config_defaults(Config* cfg) {
     },
 
     .color = {
-      .background = 0x2f3e46ff,
-      .border_select = 0x457b9dff,
-      .border_unselect = 0xcad2c5ff,
-      .font_color = 0xcad2c5ff,
+      .background      = 0x12171aff,
+      .border_select   = 0x7dd3fcff,
+      .border_unselect = 0x334155ff,
+      .font_color      = 0xe2e8f0ff,
     },
 
     .atlas_size = { 120.0f, 10000.0f },
   };
 }
 
-b8 config_new(Config* cfg, const char* path) {
+static char* config_get_dir(void) {
+  const char* home = getenv("HOME");
+
+  if (!home)
+    return NULL;
+
+  char* path = mem_alloc(PATH_MAX);
+  snprintf(path, PATH_MAX, "%s/.config/mural", home);
+
+  return path;
+}
+
+static char* config_get_path(const char* dir) {
+  char* path = mem_alloc(PATH_MAX);
+  snprintf(path, PATH_MAX, "%s/mural.toml", dir);
+
+  return path;
+}
+
+static b8 config_make_dir(const char* dir) {
+  const char* home = getenv("HOME");
+
+  if (!home)
+    return false;
+
+  char config_dir[PATH_MAX];
+  snprintf(config_dir, sizeof(config_dir), "%s/.config", home);
+
+  if (mkdir(config_dir, 0755) != 0 && errno != EEXIST) {
+    log_error("Failed to create directory: %s\n", config_dir);
+    return false;
+  }
+
+  if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    log_error("Failed to create directory: %s\n", dir);
+    return false;
+  }
+
+  return true;
+}
+
+static b8 config_copy_file(const char* src, const char* dst) {
+  FILE* input = fopen(src, "rb");
+
+  if (!input)
+    return false;
+
+  FILE* output = fopen(dst, "wb");
+
+  if (!output) {
+    fclose(input);
+    return false;
+  }
+
+  char buffer[8192];
+  size_t n;
+
+  while ((n = fread(buffer, 1, sizeof(buffer), input)) > 0) {
+    if (fwrite(buffer, 1, n, output) != n) {
+      fclose(input);
+      fclose(output);
+      return false;
+    }
+  }
+
+  fclose(input);
+
+  if (fclose(output) != 0)
+    return false;
+
+  return true;
+}
+
+static b8 config_copy_font(const char* config_dir) {
+  char exe_path[PATH_MAX];
+
+  ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+
+  if (len <= 0)
+    return false;
+
+  exe_path[len] = '\0';
+
+  char* exe_dir = dirname(exe_path);
+
+  char src[PATH_MAX];
+  char dst[PATH_MAX];
+
+  // bin/mural -> ../font.otf
+  snprintf(src, sizeof(src), "%s/../font.otf", exe_dir);
+  snprintf(dst, sizeof(dst), "%s/font.otf", config_dir);
+
+  if (access(dst, F_OK) == 0)
+    return true;
+
+  if (!config_copy_file(src, dst)) {
+    log_warn("Failed to copy font: %s\n", src);
+    return false;
+  }
+
+  return true;
+}
+
+b8 config_new(Config* cfg) {
   config_defaults(cfg);
 
-  if (access(path, F_OK) != 0) {
-    config_save(cfg, path);
+  cfg->config_dir = config_get_dir();
+
+  if (!cfg->config_dir)
+    return false;
+
+  if (!config_make_dir(cfg->config_dir)) {
+    config_delete(cfg);
+    return false;
+  }
+
+  // Copy font into the config directory.
+  config_copy_font(cfg->config_dir);
+
+  cfg->config_path = config_get_path(cfg->config_dir);
+
+  // Create default config if it does not exist.
+  if (access(cfg->config_path, F_OK) != 0) {
+    config_save(cfg);
     return true;
   }
 
-  toml_result_t result = toml_parse_file_ex(path);
+  toml_result_t result = toml_parse_file_ex(cfg->config_path);
 
   if (!result.ok) {
     log_error("Failed to parse config: %s\n", result.errmsg);
+    config_delete(cfg);
     return false;
   }
 
@@ -308,31 +433,41 @@ b8 config_new(Config* cfg, const char* path) {
   };
 
   toml_free(result);
+
+  // Resolve font relative to the config directory.
+  if (cfg->general.font_file && cfg->general.font_file[0] != '/') {
+    char font_path[PATH_MAX];
+
+    snprintf(
+      font_path,
+      sizeof(font_path),
+      "%s/%s",
+      cfg->config_dir,
+      cfg->general.font_file
+    );
+
+    free((void*)cfg->general.font_file);
+    cfg->general.font_file = strdup(font_path);
+  }
+
   return true;
 }
 
-void config_save(Config* cfg, const char* path) {
+void config_save(Config* cfg) {
   char temp_path[PATH_MAX];
-  snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+  snprintf(temp_path, sizeof(temp_path), "%s.tmp", cfg->config_path);
 
   FILE* file = fopen(temp_path, "w");
 
   if (!file) {
-    log_error("Failed to save config: %s\n", path);
+    log_error("Failed to save config: %s\n", cfg->config_path);
     return;
   }
 
   fprintf(file,
     "[general]\n"
     "scroll_speed = %.1f\n"
-    "font_file = ",
-    cfg->general.scroll_speed
-  );
-
-  config_write_string(file, cfg->general.font_file);
-
-  fprintf(file,
-    "\n"
+    "font_file = \"font.otf\"\n"
     "font_size = %.1f\n"
     "\n"
     "[layout]\n"
@@ -350,6 +485,7 @@ void config_save(Config* cfg, const char* path) {
     "\n"
     "[wallpapers]\n"
     "paths = [\n",
+    cfg->general.scroll_speed,
     cfg->general.font_size,
     cfg->layout.thumbnail_width,
     cfg->layout.thumbnail_radius,
@@ -381,13 +517,13 @@ void config_save(Config* cfg, const char* path) {
   }
 
   if (fclose(file) != 0) {
-    log_error("Failed to save config: %s\n", path);
+    log_error("Failed to save config: %s\n", cfg->config_path);
     remove(temp_path);
     return;
   }
 
-  if (rename(temp_path, path) != 0) {
-    log_error("Failed to replace config: %s\n", path);
+  if (rename(temp_path, cfg->config_path) != 0) {
+    log_error("Failed to replace config: %s\n", cfg->config_path);
     remove(temp_path);
   }
 }
@@ -397,12 +533,17 @@ void config_delete(Config* cfg) {
     free((void*)cfg->paths.items[i]);
 
   mem_free(cfg->paths.items);
+
   free((void*)cfg->general.font_file);
   free(cfg->selected_wallpaper);
+  free(cfg->config_dir);
+  free(cfg->config_path);
 
   cfg->paths = (WallpaperPaths) {0};
   cfg->general.font_file = NULL;
   cfg->selected_wallpaper = NULL;
+  cfg->config_dir = NULL;
+  cfg->config_path = NULL;
 }
 
 // :wallpaper impl
@@ -411,7 +552,6 @@ b8 wallpaper_read_from_file(Wallpaper* wp) {
 
   i32 w, h, c;
 
-  // Load a smaller image for the thumbnail
   u8* full_data = jpeg_load_scaled(wp->path, config.layout.thumbnail_width * 2, &w, &h);
 
   if (!full_data)
@@ -801,6 +941,7 @@ void app_clamp_camera(App* app) {
 
   for (i32 i = 0; i < app->wallpapers.len; i++) {
     Wallpaper* wp = &app->wallpapers.items[i];
+
     f32 bottom = wp->y + wp->h;
 
     if (bottom > content_bottom)
@@ -829,7 +970,7 @@ void app_select_wallpaper(App* app, Wallpaper* wp) {
   free(config.selected_wallpaper);
   config.selected_wallpaper = strdup(wp->path);
 
-  config_save(&config, "./mural.toml");
+  config_save(&config);
 
   log_info("Selected wallpaper: %s\n", wp->path);
 }
@@ -839,7 +980,7 @@ int main(int argc, char** argv) {
   ctx_begin();
 
   // Load the config before creating the app
-  if (!config_new(&config, "./mural.toml")) {
+  if (!config_new(&config)) {
     log_error("Failed to load config\n");
     return 1;
   }

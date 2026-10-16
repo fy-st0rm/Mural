@@ -1,6 +1,6 @@
 [general]
 scroll_speed = 30.0
-font_file = "./font.otf"
+font_file = "/home/st0rm/nest/projects/Mural/font.otf"
 font_size = 120.0
 
 [layout]
@@ -18,6 +18,6 @@ font_color      = 0xe2e8f0ff
 
 [wallpapers]
 paths = [
-  "/home/user/Wallpapers"
+  "/home/st0rm/nest/sos/Wallpapers"
 ]
 selected_wallpaper = ""

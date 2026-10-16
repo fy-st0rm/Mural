@@ -6,7 +6,7 @@ int main(int argc, char** argv) {
 
   CBuild build = {0};
   cbuild_cc(&build, "gcc");
-  cbuild_out(&build, "./mural");
+  cbuild_out(&build, "./bin/mural");
 
   cbuild_flags(&build, "-D_GNU_SOURCE", "-ggdb");
   cbuild_include_paths(
