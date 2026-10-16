@@ -4,6 +4,24 @@ Mural is a small wallpaper browser for Linux written in C.
 
 It uses OpenGL for rendering and X11 for the desktop environment.
 
+## Use
+
+### Building
+```bash
+$ gcc -o cbuild cbuild.c
+$ ./cbuild
+```
+
+### Running
+```bash
+$ ./mural
+```
+
+### Restore wallpaper
+```bash
+$ ./mural --restore
+```
+
 ## Features
 
 - Browse wallpapers in a thumbnail grid

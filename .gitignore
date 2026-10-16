@@ -1,2 +1,4 @@
 bin/
 cbuild
+__cbuild_artifacts
+mural
